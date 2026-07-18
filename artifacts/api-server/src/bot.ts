@@ -54,7 +54,17 @@ async function askGemini(chatId: number, userText: string): Promise<string> {
   const apiKey = process.env["GEMINI_API_KEY"];
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
 
-  const ai = new GoogleGenAI({ apiKey });
+  // "AQ." prefix = new Google Auth key (OAuth2 bearer token format).
+  // Must be sent as "Authorization: Bearer <token>", NOT as x-goog-api-key.
+  // Standard "AIza" keys use the apiKey field as before.
+  const isAuthKey = apiKey.startsWith("AQ.");
+  console.log(`[Gemini] Key format: ${isAuthKey ? "Auth key (AQ.) → Bearer token" : "Standard API key (AIza)"}`);
+
+  const ai = isAuthKey
+    ? new GoogleGenAI({
+        httpOptions: { headers: { Authorization: `Bearer ${apiKey}` } },
+      })
+    : new GoogleGenAI({ apiKey });
 
   // Build history BEFORE appending the new user turn
   const history = getHistory(chatId);
