@@ -6,7 +6,7 @@ import { GoogleGenAI } from "@google/genai";
 // ---------------------------------------------------------------------------
 
 const MAX_HISTORY = 10; // max conversation turns kept per user
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-2.0-flash";
 const FALLBACK_MESSAGE =
   "Sorry, I ran into a problem reaching my AI brain. Please try again in a moment! 🙏";
 
@@ -52,12 +52,6 @@ function appendHistory(
 
 async function askGemini(chatId: number, userText: string): Promise<string> {
   const apiKey = process.env["GEMINI_API_KEY"];
-
-  // Diagnostic: confirm key is present without exposing it
-  console.log(
-    `[Gemini] GEMINI_API_KEY — defined: ${!!apiKey}, length: ${apiKey?.length ?? 0}, first5: "${apiKey?.slice(0, 5) ?? "N/A"}"`,
-  );
-
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
 
   const ai = new GoogleGenAI({ apiKey });
@@ -65,58 +59,23 @@ async function askGemini(chatId: number, userText: string): Promise<string> {
   // Build history BEFORE appending the new user turn
   const history = getHistory(chatId);
 
+  console.log(`[Gemini] Sending prompt for chat ${chatId}: "${userText}"`);
+
+  const chat = ai.chats.create({
+    model: GEMINI_MODEL,
+    history: history.length > 0 ? history : undefined,
+  });
+
+  const response = await chat.sendMessage({ message: userText });
+
+  const replyText =
+    response.text?.trim() ?? "I got an empty response — please try again.";
+
   console.log(
-    `[Gemini] Sending prompt for chat ${chatId} (history turns: ${history.length}): "${userText}"`,
+    `[Gemini] Reply received for chat ${chatId}: "${replyText.slice(0, 120)}${replyText.length > 120 ? "…" : ""}"`,
   );
 
-  try {
-    const chat = ai.chats.create({
-      model: GEMINI_MODEL,
-      history: history.length > 0 ? history : undefined,
-    });
-
-    const response = await chat.sendMessage({ message: userText });
-
-    const replyText =
-      response.text?.trim() ?? "I got an empty response — please try again.";
-
-    console.log(
-      `[Gemini] Reply received for chat ${chatId}: "${replyText.slice(0, 120)}${replyText.length > 120 ? "…" : ""}"`,
-    );
-
-    return replyText;
-  } catch (geminiErr: unknown) {
-    // Print every piece of information available on the error
-    console.error("[Gemini] ===== FULL ERROR DUMP =====");
-    console.error("[Gemini] typeof error:", typeof geminiErr);
-    console.error("[Gemini] error (raw):", geminiErr);
-
-    if (geminiErr instanceof Error) {
-      console.error("[Gemini] error.name:", geminiErr.name);
-      console.error("[Gemini] error.message:", geminiErr.message);
-      console.error("[Gemini] error.stack:", geminiErr.stack);
-    }
-
-    // The @google/genai SDK attaches HTTP details to the error object
-    const e = geminiErr as Record<string, unknown>;
-    if (e["status"] !== undefined)
-      console.error("[Gemini] error.status:", e["status"]);
-    if (e["statusText"] !== undefined)
-      console.error("[Gemini] error.statusText:", e["statusText"]);
-    if (e["errorDetails"] !== undefined)
-      console.error(
-        "[Gemini] error.errorDetails:",
-        JSON.stringify(e["errorDetails"], null, 2),
-      );
-    if (e["response"] !== undefined)
-      console.error(
-        "[Gemini] error.response:",
-        JSON.stringify(e["response"], null, 2),
-      );
-
-    console.error("[Gemini] ===== END ERROR DUMP =====");
-    throw geminiErr; // re-throw so the outer catch sends the fallback
-  }
+  return replyText;
 }
 
 // ---------------------------------------------------------------------------
