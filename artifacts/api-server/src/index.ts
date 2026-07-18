@@ -24,3 +24,6 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 });
+
+// Start Telegram bot with long polling
+startBot();
