@@ -99,6 +99,11 @@ export function startBot(): void {
     return;
   }
 
+  // Confirm which key is loaded at runtime (first 10 chars only — never log the full key)
+  console.log(
+    `[Bot] GEMINI_API_KEY at startup — length: ${geminiKey.length}, first10: "${geminiKey.slice(0, 10)}"`,
+  );
+
   // Long polling — no webhook URL needed
   const bot = new TelegramBot(token, { polling: true });
 
