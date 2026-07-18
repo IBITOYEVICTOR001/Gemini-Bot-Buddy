@@ -1,12 +1,12 @@
 import TelegramBot from "node-telegram-bot-api";
-import { GoogleGenAI } from "@google/genai";
+import OpenAI from "openai";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const MAX_HISTORY = 10; // max conversation turns kept per user
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GROQ_MODEL = "llama-3.3-70b-versatile";
 const FALLBACK_MESSAGE =
   "Sorry, I ran into a problem reaching my AI brain. Please try again in a moment! 🙏";
 
@@ -14,10 +14,9 @@ const FALLBACK_MESSAGE =
 // Types
 // ---------------------------------------------------------------------------
 
-interface ConversationTurn {
-  role: "user" | "model";
-  parts: { text: string }[];
-}
+type ConversationTurn =
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string };
 
 // ---------------------------------------------------------------------------
 // In-memory conversation history — keyed by Telegram chat ID
@@ -34,56 +33,52 @@ function getHistory(chatId: number): ConversationTurn[] {
 
 function appendHistory(
   chatId: number,
-  role: "user" | "model",
+  role: "user" | "assistant",
   text: string,
 ): void {
   const history = getHistory(chatId);
-  history.push({ role, parts: [{ text }] });
+  history.push({ role, content: text });
 
-  // Keep only the last MAX_HISTORY turns (each turn = 1 entry)
+  // Keep only the last MAX_HISTORY turns
   if (history.length > MAX_HISTORY) {
     history.splice(0, history.length - MAX_HISTORY);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Gemini helper
+// Groq helper (OpenAI-compatible SDK pointed at Groq's base URL)
 // ---------------------------------------------------------------------------
 
-async function askGemini(chatId: number, userText: string): Promise<string> {
-  const apiKey = process.env["GEMINI_API_KEY"];
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
+async function askGroq(chatId: number, userText: string): Promise<string> {
+  const apiKey = process.env["GROQ_API_KEY"];
+  if (!apiKey) throw new Error("GROQ_API_KEY is not set");
 
-  // "AQ." prefix = new Google Auth key (OAuth2 bearer token format).
-  // Must be sent as "Authorization: Bearer <token>", NOT as x-goog-api-key.
-  // Standard "AIza" keys use the apiKey field as before.
-  const isAuthKey = apiKey.startsWith("AQ.");
-  console.log(`[Gemini] Key format: ${isAuthKey ? "Auth key (AQ.) → Bearer token" : "Standard API key (AIza)"}`);
-
-  const ai = isAuthKey
-    ? new GoogleGenAI({
-        httpOptions: { headers: { Authorization: `Bearer ${apiKey}` } },
-      })
-    : new GoogleGenAI({ apiKey });
-
-  // Build history BEFORE appending the new user turn
-  const history = getHistory(chatId);
-
-  console.log(`[Gemini] Sending prompt for chat ${chatId}: "${userText}"`);
-
-  const chat = ai.chats.create({
-    model: GEMINI_MODEL,
-    history: history.length > 0 ? history : undefined,
+  const groq = new OpenAI({
+    apiKey,
+    baseURL: "https://api.groq.com/openai/v1",
   });
 
-  const response = await chat.sendMessage({ message: userText });
+  // Append user turn to history first
+  appendHistory(chatId, "user", userText);
+  const messages = getHistory(chatId) as OpenAI.ChatCompletionMessageParam[];
+
+  console.log(`[Groq] Sending prompt for chat ${chatId}: "${userText}"`);
+
+  const response = await groq.chat.completions.create({
+    model: GROQ_MODEL,
+    messages,
+  });
 
   const replyText =
-    response.text?.trim() ?? "I got an empty response — please try again.";
+    response.choices[0]?.message?.content?.trim() ??
+    "I got an empty response — please try again.";
 
   console.log(
-    `[Gemini] Reply received for chat ${chatId}: "${replyText.slice(0, 120)}${replyText.length > 120 ? "…" : ""}"`,
+    `[Groq] Reply received for chat ${chatId}: "${replyText.slice(0, 120)}${replyText.length > 120 ? "…" : ""}"`,
   );
+
+  // Store assistant reply in history
+  appendHistory(chatId, "assistant", replyText);
 
   return replyText;
 }
@@ -101,17 +96,16 @@ export function startBot(): void {
     return;
   }
 
-  const geminiKey = process.env["GEMINI_API_KEY"];
-  if (!geminiKey) {
+  const groqKey = process.env["GROQ_API_KEY"];
+  if (!groqKey) {
     console.error(
-      "[Bot] GEMINI_API_KEY is not set — Telegram bot will NOT start.",
+      "[Bot] GROQ_API_KEY is not set — Telegram bot will NOT start.",
     );
     return;
   }
 
-  // Confirm which key is loaded at runtime (first 10 chars only — never log the full key)
   console.log(
-    `[Bot] GEMINI_API_KEY at startup — length: ${geminiKey.length}, first10: "${geminiKey.slice(0, 10)}"`,
+    `[Bot] GROQ_API_KEY at startup — length: ${groqKey.length}, first6: "${groqKey.slice(0, 6)}"`,
   );
 
   // Long polling — no webhook URL needed
@@ -125,7 +119,7 @@ export function startBot(): void {
     const userText = msg.text;
     const senderName =
       msg.from?.username ??
-      `${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ??
+      `${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
       String(chatId);
 
     // Ignore non-text messages (photos, stickers, etc.)
@@ -138,23 +132,14 @@ export function startBot(): void {
     );
 
     try {
-      // Append user turn BEFORE calling Gemini (Gemini will read history without this turn)
-      appendHistory(chatId, "user", userText);
+      const reply = await askGroq(chatId, userText);
 
-      // Call Gemini
-      const reply = await askGemini(chatId, userText);
-
-      // Store Gemini's reply in history
-      appendHistory(chatId, "model", reply);
-
-      // Send reply back to Telegram
       await bot.sendMessage(chatId, reply);
       console.log(`[Telegram] Reply sent to chat ${chatId} ✅`);
-    } catch (err) {
-      console.error(
-        `[Bot] Error processing message from chat ${chatId}:`,
-        err,
-      );
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[Bot] Error processing message from chat ${chatId}: ${message}`);
+      console.error("[Bot] Full error:", err);
 
       try {
         await bot.sendMessage(chatId, FALLBACK_MESSAGE);
