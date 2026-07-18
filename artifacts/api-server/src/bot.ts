@@ -119,8 +119,8 @@ export function startBot(): void {
     const userText = msg.text;
     const senderName =
       msg.from?.username ??
-      `${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
-      String(chatId);
+      (`${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
+        String(chatId));
 
     // Ignore non-text messages (photos, stickers, etc.)
     if (!userText) {
