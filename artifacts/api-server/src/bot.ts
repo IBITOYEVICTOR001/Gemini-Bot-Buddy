@@ -441,33 +441,26 @@ async function handleImageGen(
   bot: TelegramBot,
   prompt: string,
 ): Promise<void> {
-  const seed = Date.now() % 1_000_000;
-  const encodedPrompt = encodeURIComponent(prompt);
-  
-  // Clean path configuration forcing explicit image format targeting
-  const imageUrl = `${POLLINATIONS_BASE_URL}${encodedPrompt}.jpg?width=1024&height=1024&nologo=true&seed=${seed}`;
+  try {
+    console.log(`[ImageGen] Chat ${chatId} — prompt: "${prompt}"`);
+    await bot.sendChatAction(chatId, "upload_photo");
 
-  console.log(
-    `[ImageGen] Chat ${chatId} — prompt: "${prompt}" | URL: ${imageUrl}`,
-  );
+    const response = await axios.get(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      responseType: "stream",
+      timeout: 15000,
+    });
 
-  await bot.sendChatAction(chatId, "upload_photo");
+    await bot.sendPhoto(chatId, response.data, {}, {
+      filename: "image.jpg",
+      contentType: "image/jpeg",
+    });
 
-  // Download the image as a buffer to avoid Telegram's URL-fetch timeout (400 Bad Request)
-  const response = await axios.get<ArrayBuffer>(imageUrl, {
-    responseType: "arraybuffer",
-    timeout: 15000,
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
-    },
-  });
-  const imageBuffer = Buffer.from(response.data);
-
-  await bot.sendPhoto(chatId, imageBuffer, {
-    caption: `Here is your image: "${prompt}"`,
-  });
-
-  console.log(`[ImageGen] Photo sent to chat ${chatId} ✅`);
+    console.log(`[ImageGen] Photo sent to chat ${chatId} ✅`);
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
