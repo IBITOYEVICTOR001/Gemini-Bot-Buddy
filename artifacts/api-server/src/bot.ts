@@ -518,22 +518,17 @@ async function handleVideoGen(
     const magicHour = getMagicHourClient();
 
     const response = await magicHour.v1.textToVideo.generate({
-  prompt: prompt,
-  endSeconds: 5,
-  style: {
-    id: "realistic",
-    name: "Realistic"
-  }
-});
-      prompt,
+      prompt: prompt,
       endSeconds: 5,
-      style: { id: "realistic", name: "Realistic" },
-      waitForCompletion: true,
+      style: {
+        id: "realistic",
+        name: "Realistic"
+      },
+      waitForCompletion: true
     });
 
     // Extract video URL from response
-    const videoUrl = (response as unknown as Record<string, unknown>)
-      .videoUrl;
+    const videoUrl = (response as unknown as Record<string, unknown>).videoUrl;
     if (!videoUrl || typeof videoUrl !== "string") {
       throw new Error("Invalid response: missing or invalid videoUrl");
     }
