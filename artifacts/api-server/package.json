@@ -18,7 +18,7 @@
     "drizzle-orm": "catalog:",
     "duck-duck-scrape": "^2.2.7",
     "express": "^5.2.1",
-    "magic-hour": "^1.0.0",
+    "magic-hour": "0.69.0",
     "node-telegram-bot-api": "^1.2.0",
     "openai": "^6.48.0",
     "pdf-parse": "^2.4.5",
