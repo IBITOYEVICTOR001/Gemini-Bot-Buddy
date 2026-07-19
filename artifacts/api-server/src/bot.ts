@@ -2,6 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import OpenAI from "openai";
 import { tavily, type TavilyClient } from "@tavily/core";
 import { PDFParse } from "pdf-parse";
+import { search as duckDuckGoSearch } from "duck-duck-scrape";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -257,26 +258,90 @@ async function decideSearch(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2 — run Tavily web search
+// Phase 2 — run multi-engine web search (Tavily + DuckDuckGo)
 // ---------------------------------------------------------------------------
 
+/**
+ * Fetches results from Tavily.
+ * Returns empty array on error instead of crashing.
+ */
+async function runTavilySearch(query: string): Promise<SearchResult[]> {
+  try {
+    const client = getTavilyClient();
+    const response = await client.search(query, {
+      searchDepth: "basic",
+      maxResults: 5,
+      includeAnswer: false,
+    });
+
+    const results: SearchResult[] = (response.results ?? []).map((r) => ({
+      title: r.title ?? "",
+      url: r.url ?? "",
+      content: r.content ?? "",
+    }));
+
+    console.log(`[Tavily] "${query}" → ${results.length} result(s)`);
+    return results;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[Tavily] Search failed for query "${query}": ${msg}`);
+    return [];
+  }
+}
+
+/**
+ * Fetches results from DuckDuckGo via duck-duck-scrape.
+ * Returns empty array on error instead of crashing.
+ */
+async function runDuckDuckGoSearch(query: string): Promise<SearchResult[]> {
+  try {
+    const response = await duckDuckGoSearch(query, { safeSearch: "off" });
+    const results: SearchResult[] = (response.results ?? [])
+      .slice(0, 5)
+      .map((r) => ({
+        title: r.title ?? "",
+        url: r.url ?? "",
+        content: r.description ?? "",
+      }));
+
+    console.log(`[DuckDuckGo] "${query}" → ${results.length} result(s)`);
+    return results;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[DuckDuckGo] Search failed for query "${query}": ${msg}`);
+    return [];
+  }
+}
+
+/**
+ * Runs web search against both Tavily and DuckDuckGo in parallel.
+ * Merges and deduplicates results by URL.
+ * If one engine fails, proceeds with results from the other.
+ */
 async function runWebSearch(query: string): Promise<SearchResult[]> {
-  const client = getTavilyClient();
+  // Fire both searches in parallel
+  const [tavilyResults, duckDuckGoResults] = await Promise.all([
+    runTavilySearch(query),
+    runDuckDuckGoSearch(query),
+  ]);
 
-  const response = await client.search(query, {
-    searchDepth: "basic",
-    maxResults: 5,
-    includeAnswer: false,
-  });
+  // Merge results and deduplicate by URL
+  const merged = [...tavilyResults, ...duckDuckGoResults];
+  const seen = new Set<string>();
+  const deduplicated: SearchResult[] = [];
 
-  const results: SearchResult[] = (response.results ?? []).map((r) => ({
-    title: r.title ?? "",
-    url: r.url ?? "",
-    content: r.content ?? "",
-  }));
+  for (const result of merged) {
+    if (result.url && !seen.has(result.url)) {
+      seen.add(result.url);
+      deduplicated.push(result);
+    }
+  }
 
-  console.log(`[Tavily] "${query}" → ${results.length} result(s)`);
-  return results;
+  console.log(
+    `[WebSearch] Combined results: ${tavilyResults.length} from Tavily + ${duckDuckGoResults.length} from DuckDuckGo = ${deduplicated.length} deduplicated`,
+  );
+
+  return deduplicated;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,10 +377,12 @@ async function getFinalAnswer(
 
     effectiveUserContent =
       `The following live web search results were retrieved for this question. ` +
-      `These are your primary source — state what they say directly and confidently. ` +
+      `These results are aggregated from multiple search engines (Tavily and DuckDuckGo). ` +
+      `Use this cross-checked information to provide an accurate, up-to-date answer. ` +
+      `State what they say directly and confidently. ` +
       `Do NOT hedge or express doubt when the results clearly address the question. ` +
       `Only use uncertain language if the results are genuinely vague, contradictory, or don't cover the question.\n\n` +
-      `=== LIVE SEARCH RESULTS ===\n${searchContext}\n=== END OF RESULTS ===\n\n` +
+      `=== LIVE SEARCH RESULTS (Multi-Engine Aggregated) ===\n${searchContext}\n=== END OF RESULTS ===\n\n` +
       `User question: ${userText}`;
 
     sources.push(...searchResults.map((r) => r.url).filter(Boolean));
@@ -360,7 +427,7 @@ async function handleUserMessage(
     } catch (searchErr: unknown) {
       const msg =
         searchErr instanceof Error ? searchErr.message : String(searchErr);
-      console.error(`[Tavily] Search failed for chat ${chatId}: ${msg}`);
+      console.error(`[WebSearch] Search failed for chat ${chatId}: ${msg}`);
     }
   }
 
@@ -824,7 +891,7 @@ export function startBot(): void {
   const tavilyKey = process.env["TAVILY_API_KEY"];
   if (!tavilyKey) {
     console.warn(
-      "[Bot] TAVILY_API_KEY is not set — web search will be disabled.",
+      "[Bot] TAVILY_API_KEY is not set — web search will be limited to DuckDuckGo only.",
     );
   }
 
@@ -838,6 +905,9 @@ export function startBot(): void {
   console.log("[Bot] GROQ_API_KEY defined: true");
   console.log(`[Bot] TAVILY_API_KEY defined: ${Boolean(tavilyKey)}`);
   console.log(`[Bot] OCR_SPACE_API_KEY defined: ${Boolean(ocrKey)}`);
+  console.log(
+    "[Bot] Web search: enabled (multi-engine: Tavily + DuckDuckGo with fallback)",
+  );
   console.log("[Bot] Image generation: enabled (Pollinations.ai, no key needed)");
   console.log("[Bot] PDF reading: enabled (pdf-parse, no key needed)");
   console.log(`[Bot] Model: ${GROQ_MODEL}`);
