@@ -456,6 +456,9 @@ async function handleImageGen(
   // Download the image as a buffer to avoid Telegram's URL-fetch timeout (400 Bad Request)
   const response = await axios.get<ArrayBuffer>(imageUrl, {
     responseType: "arraybuffer",
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
+    },
   });
   const imageBuffer = Buffer.from(response.data);
 
