@@ -16,7 +16,7 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "drizzle-orm": "catalog:",
-    "duck-duck-scrape": "^3.2.9",
+    "duck-duck-scrape": "^2.2.7",
     "express": "^5.2.1",
     "node-telegram-bot-api": "^1.2.0",
     "openai": "^6.48.0",
