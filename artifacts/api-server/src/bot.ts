@@ -519,6 +519,8 @@ async function handleVideoGen(
 
     const response = await magicHour.v1.textToVideo.generate({
       prompt,
+      endSeconds: 5,
+      style: { id: "realistic", name: "Realistic" },
       waitForCompletion: true,
     });
 
