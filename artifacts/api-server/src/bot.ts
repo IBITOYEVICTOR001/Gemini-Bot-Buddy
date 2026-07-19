@@ -73,10 +73,6 @@ Format for readability: short paragraphs, bullet points for lists.`;
 // Image generation intent detection
 // ---------------------------------------------------------------------------
 
-/**
- * Verbs and nouns that signal an image-generation request.
- * Both must appear for the message to be routed to image generation.
- */
 const IMAGE_GEN_VERB_RE =
   /\b(generate|draw|create|make|design|render|paint|sketch|produce|show me)\b/i;
 
@@ -89,11 +85,9 @@ const IMAGE_GEN_NOUN_RE =
  */
 function extractImageGenPrompt(text: string): string | null {
   if (!IMAGE_GEN_VERB_RE.test(text)) return null;
-  // "draw" alone implies an image even without an explicit image noun
   const hasDraw = /\bdraw\b/i.test(text);
   if (!hasDraw && !IMAGE_GEN_NOUN_RE.test(text)) return null;
 
-  // Strip the generation preamble to get just the descriptive subject
   const stripped = text
     .replace(
       /^(generate|draw|create|make|design|render|paint|sketch|produce)\s+(me\s+)?/i,
@@ -103,9 +97,11 @@ function extractImageGenPrompt(text: string): string | null {
       /^(an?\s+)?(image|picture|photo|illustration|art(?:work)?|painting|portrait|poster|logo|icon|banner|wallpaper|cartoon|drawing|meme|thumbnail|visual|graphic|scene|landscape)\s+(of\s+)?/i,
       "",
     )
+    .replace(/\b(for me|please)\b/i, "")
     .trim();
 
-  return stripped.length > 0 ? stripped : text.trim();
+  // FIX: If the prompt is empty because the user just said "generate an image", fallback to a default prompt
+  return stripped.length > 0 ? stripped : "a beautiful random fantasy landscape painting";
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +146,7 @@ interface OcrSpaceResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Clients — lazily initialised on first use so env-var errors surface clearly
+// Clients
 // ---------------------------------------------------------------------------
 
 let groqClient: OpenAI | null = null;
@@ -185,7 +181,7 @@ function getMagicHourClient(): Client {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory conversation history — keyed by Telegram chat ID
+// History
 // ---------------------------------------------------------------------------
 
 const conversationHistory = new Map<number, ConversationTurn[]>();
@@ -206,7 +202,7 @@ function appendHistory(chatId: number, role: Role, content: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1 — decide whether a web search is needed
+// Logic Processes
 // ---------------------------------------------------------------------------
 
 async function decideSearch(
@@ -268,14 +264,6 @@ async function decideSearch(
   return decision;
 }
 
-// ---------------------------------------------------------------------------
-// Phase 2 — run multi-engine web search (Tavily + DuckDuckGo)
-// ---------------------------------------------------------------------------
-
-/**
- * Fetches results from Tavily.
- * Returns empty array on error instead of crashing.
- */
 async function runTavilySearch(query: string): Promise<SearchResult[]> {
   try {
     const client = getTavilyClient();
@@ -300,10 +288,6 @@ async function runTavilySearch(query: string): Promise<SearchResult[]> {
   }
 }
 
-/**
- * Fetches results from DuckDuckGo via duck-duck-scrape.
- * Returns empty array on error instead of crashing.
- */
 async function runDuckDuckGoSearch(query: string): Promise<SearchResult[]> {
   try {
     const response = await duckDuckGoSearch(query, { safeSearch: "off" });
@@ -324,19 +308,12 @@ async function runDuckDuckGoSearch(query: string): Promise<SearchResult[]> {
   }
 }
 
-/**
- * Runs web search against both Tavily and DuckDuckGo in parallel.
- * Merges and deduplicates results by URL.
- * If one engine fails, proceeds with results from the other.
- */
 async function runWebSearch(query: string): Promise<SearchResult[]> {
-  // Fire both searches in parallel
   const [tavilyResults, duckDuckGoResults] = await Promise.all([
     runTavilySearch(query),
     runDuckDuckGoSearch(query),
   ]);
 
-  // Merge results and deduplicate by URL
   const merged = [...tavilyResults, ...duckDuckGoResults];
   const seen = new Set<string>();
   const deduplicated: SearchResult[] = [];
@@ -354,10 +331,6 @@ async function runWebSearch(query: string): Promise<SearchResult[]> {
 
   return deduplicated;
 }
-
-// ---------------------------------------------------------------------------
-// Phase 3 — ask Groq for the final answer (with optional search context)
-// ---------------------------------------------------------------------------
 
 async function getFinalAnswer(
   chatId: number,
@@ -419,10 +392,6 @@ async function getFinalAnswer(
   return { reply, sources };
 }
 
-// ---------------------------------------------------------------------------
-// Orchestrator — ties the three phases together (existing chat flow)
-// ---------------------------------------------------------------------------
-
 async function handleUserMessage(
   chatId: number,
   userText: string,
@@ -463,13 +432,9 @@ async function handleUserMessage(
 }
 
 // ---------------------------------------------------------------------------
-// NEW: Image generation via Pollinations.ai (UPDATED: Path-based parameters)
+// Image generation via Pollinations.ai (FIXED: Path parameters + format validation)
 // ---------------------------------------------------------------------------
 
-/**
- * Builds a Pollinations.ai image URL and sends the resulting photo to the chat.
- * Uses a clean path-based structure ending in .jpg so Telegram accepts the URL natively.
- */
 async function handleImageGen(
   chatId: number,
   bot: TelegramBot,
@@ -478,7 +443,7 @@ async function handleImageGen(
   const seed = Date.now() % 1_000_000;
   const encodedPrompt = encodeURIComponent(prompt);
   
-  // Clean path-based URL structure ending in .jpg to avoid query string parsing quirks in Telegram
+  // Clean path configuration forcing explicit image format targeting
   const imageUrl = `${POLLINATIONS_BASE_URL}${encodedPrompt}.jpg?width=1024&height=1024&nologo=true&seed=${seed}`;
 
   console.log(
@@ -494,20 +459,16 @@ async function handleImageGen(
 }
 
 // ---------------------------------------------------------------------------
-// NEW: Video generation via Magic Hour API (UPDATED: Buffer loading & Dynamic URL capture)
+// Video generation via Magic Hour API (FIXED: Safe extraction fallback & Logging)
 // ---------------------------------------------------------------------------
 
-/**
- * Generates a video using the Magic Hour API and uploads it as a file buffer.
- * Bypasses direct URL parsing issues within Telegram by pulling files locally first.
- */
 async function handleVideoGen(
   chatId: number,
   bot: TelegramBot,
   prompt: string,
 ): Promise<void> {
   console.log(
-    `[VideoGen] Chat ${chatId} — prompt: "${prompt}" | generating video...`,
+    `[VideoGen] Chat ${chatId} — prompt: "${prompt}" | triggering Magic Hour execution...`,
   );
 
   await bot.sendChatAction(chatId, "upload_video");
@@ -525,21 +486,23 @@ async function handleVideoGen(
       waitForCompletion: true
     });
 
-    // Safely cast response object to pull video asset target property variations
+    console.log(`[VideoGen] Raw response payload collected:`, JSON.stringify(response));
+
     const data = response as any;
-    const videoUrl = data.videoUrl || data.download_url || (data.result && data.result.videoUrl);
+    // Multi-tier extraction logic protecting against alternative SDK responses
+    const videoUrl = data.videoUrl || data.downloadUrl || data.download_url || (data.result && (data.result.videoUrl || data.result.download_url));
     
     if (!videoUrl || typeof videoUrl !== "string") {
-      throw new Error(`Invalid response structure: missing videoUrl. Raw data: ${JSON.stringify(data)}`);
+      throw new Error(`Asset key matching failed. Full payload text: ${JSON.stringify(data)}`);
     }
 
-    console.log(`[VideoGen] Downloading asset from Magic Hour CDN into server memory...`);
+    console.log(`[VideoGen] Pulling remote generation into temporary server memory buffer...`);
     
     const videoRes = await fetch(videoUrl);
-    if (!videoRes.ok) throw new Error(`Could not reach video asset endpoint at ${videoUrl}`);
+    if (!videoRes.ok) throw new Error(`Asset host down or blocked access to target link: ${videoUrl}`);
     const videoBuffer = Buffer.from(await videoRes.arrayBuffer());
 
-    console.log(`[VideoGen] Uploading static binary data buffer (${videoBuffer.length} bytes) to Telegram...`);
+    console.log(`[VideoGen] Transmitting payload binary file stream directly into Telegram API chat context...`);
 
     await bot.sendVideo(chatId, videoBuffer, {
       caption: `Here is your video: "${prompt}"`,
@@ -548,10 +511,10 @@ async function handleVideoGen(
       contentType: "video/mp4"
     });
 
-    console.log(`[VideoGen] Video sent to chat ${chatId} ✅`);
+    console.log(`[VideoGen] Finished processing video upload for chat ${chatId} ✅`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[VideoGen] Generation failed for chat ${chatId}: ${msg}`);
+    console.error(`[VideoGen Critical Failure] Chat ${chatId}: ${msg}`);
     await bot.sendMessage(
       chatId,
       "Sorry, I couldn't generate the video. Please try again later.",
@@ -560,12 +523,9 @@ async function handleVideoGen(
 }
 
 // ---------------------------------------------------------------------------
-// NEW: OCR via OCR.space API
+// OCR Processing
 // ---------------------------------------------------------------------------
 
-/**
- * Downloads a Telegram file by its file ID and returns the raw bytes.
- */
 async function downloadTelegramFile(
   bot: TelegramBot,
   fileId: string,
@@ -580,10 +540,6 @@ async function downloadTelegramFile(
   return Buffer.from(await res.arrayBuffer());
 }
 
-/**
- * Sends image bytes to OCR.space and returns the extracted text.
- * Throws if the API reports a processing error.
- */
 async function runOcr(imageBuffer: Buffer): Promise<string> {
   const apiKey = process.env["OCR_SPACE_API_KEY"];
   if (!apiKey) throw new Error("OCR_SPACE_API_KEY is not set");
@@ -632,13 +588,6 @@ async function runOcr(imageBuffer: Buffer): Promise<string> {
   return extractedText;
 }
 
-/**
- * Full handler for photo messages:
- * 1. Downloads the photo from Telegram.
- * 2. Extracts text via OCR.space.
- * 3. If the message has a caption, passes both the OCR text and caption to Groq.
- * 4. Otherwise sends the raw extracted text back to the user.
- */
 async function handlePhotoMessage(
   chatId: number,
   bot: TelegramBot,
@@ -647,7 +596,6 @@ async function handlePhotoMessage(
   const photos = msg.photo;
   if (!photos || photos.length === 0) return;
 
-  // Pick the highest-resolution version Telegram provides
   const fileId = photos[photos.length - 1]!.file_id;
   const caption = msg.caption?.trim() ?? "";
 
@@ -679,7 +627,6 @@ async function handlePhotoMessage(
     return;
   }
 
-  // If the user attached a caption (question/instruction), route to Groq
   if (caption.length > 0) {
     const groq = getGroqClient();
     const userContent = `OCR extracted text:\n"""\n${extractedText}\n"""\n\nUser instruction: ${caption}`;
@@ -706,7 +653,6 @@ async function handlePhotoMessage(
       `[OCR+Groq] Reply for chat ${chatId}: "${groqReply.slice(0, 120)}${groqReply.length > 120 ? "…" : ""}"`,
     );
 
-    // Store as a conversational turn so the context carries forward
     appendHistory(chatId, "user", `[Image OCR] ${caption}`);
     appendHistory(chatId, "assistant", groqReply);
 
@@ -716,7 +662,6 @@ async function handlePhotoMessage(
         : groqReply;
     await bot.sendMessage(chatId, safe);
   } else {
-    // No caption — just return the raw extracted text
     const header = "📄 Text extracted from your image:\n\n";
     const body =
       extractedText.length > 3900
@@ -729,13 +674,9 @@ async function handlePhotoMessage(
 }
 
 // ---------------------------------------------------------------------------
-// NEW: PDF text extraction via pdf-parse v2
+// PDF Processing Logic
 // ---------------------------------------------------------------------------
 
-/**
- * Parses a PDF buffer and returns the extracted text, page count, and whether
- * the text was truncated to fit within PDF_MAX_TEXT_CHARS.
- */
 async function runPdfExtract(buffer: Buffer): Promise<PdfExtractResult> {
   const parser = new PDFParse({ data: buffer });
   try {
@@ -755,10 +696,6 @@ async function runPdfExtract(buffer: Buffer): Promise<PdfExtractResult> {
   }
 }
 
-/**
- * Sends a long text reply across multiple Telegram messages if it exceeds
- * the 4 000-character per-message limit.
- */
 async function sendLongMessage(
   bot: TelegramBot,
   chatId: number,
@@ -780,13 +717,6 @@ async function sendLongMessage(
   }
 }
 
-/**
- * Full handler for PDF document messages:
- * 1. Guards file-size and mime-type.
- * 2. Downloads the file from Telegram.
- * 3. Extracts text with pdf-parse.
- * 4. If a caption is present → Groq Q&A. Otherwise → Groq auto-summary.
- */
 async function handleDocumentMessage(
   chatId: number,
   bot: TelegramBot,
@@ -803,7 +733,6 @@ async function handleDocumentMessage(
       (caption ? `, caption: "${caption}"` : ", no caption"),
   );
 
-  // Guard: only handle PDFs
   const isPdf =
     doc.mime_type === "application/pdf" ||
     fileName.toLowerCase().endsWith(".pdf");
@@ -815,7 +744,6 @@ async function handleDocumentMessage(
     return;
   }
 
-  // Guard: Telegram's Bot API download cap
   if (fileSize > PDF_MAX_FILE_BYTES) {
     await bot.sendMessage(
       chatId,
@@ -827,7 +755,6 @@ async function handleDocumentMessage(
 
   await bot.sendChatAction(chatId, "typing");
 
-  // Download
   let buffer: Buffer;
   try {
     buffer = await downloadTelegramFile(bot, doc.file_id);
@@ -841,7 +768,6 @@ async function handleDocumentMessage(
     return;
   }
 
-  // Extract text
   let extracted: PdfExtractResult;
   try {
     extracted = await runPdfExtract(buffer);
@@ -871,7 +797,6 @@ async function handleDocumentMessage(
     : "";
 
   if (caption.length > 0) {
-    // Q&A mode — user asked something specific about the document
     console.log(
       `[PDF] Caption present — routing to Groq Q&A for chat ${chatId}`,
     );
@@ -904,7 +829,6 @@ async function handleDocumentMessage(
 
     await sendLongMessage(bot, chatId, groqReply + truncationNote);
   } else {
-    // No caption — auto-summarise
     console.log(
       `[PDF] No caption — requesting Groq auto-summary for chat ${chatId}`,
     );
@@ -944,227 +868,94 @@ async function handleDocumentMessage(
 }
 
 // ---------------------------------------------------------------------------
-// Bot bootstrap
+// Bot Entry / Event Handlers
 // ---------------------------------------------------------------------------
 
 export function startBot(): void {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
   if (!token) {
-    console.error(
-      "[Bot] TELEGRAM_BOT_TOKEN is not set — Telegram bot will NOT start.",
-    );
+    console.error("[Bot] TELEGRAM_BOT_TOKEN missing — Execution cancelled.");
     return;
   }
 
-  const groqKey = process.env["GROQ_API_KEY"];
-  if (!groqKey) {
-    console.error(
-      "[Bot] GROQ_API_KEY is not set — Telegram bot will NOT start.",
-    );
+  if (!process.env["GROQ_API_KEY"]) {
+    console.error("[Bot] GROQ_API_KEY missing — Execution cancelled.");
     return;
   }
-
-  const tavilyKey = process.env["TAVILY_API_KEY"];
-  if (!tavilyKey) {
-    console.warn(
-      "[Bot] TAVILY_API_KEY is not set — web search will be limited to DuckDuckGo only.",
-    );
-  }
-
-  const ocrKey = process.env["OCR_SPACE_API_KEY"];
-  if (!ocrKey) {
-    console.warn(
-      "[Bot] OCR_SPACE_API_KEY is not set — image OCR will be disabled.",
-    );
-  }
-
-  const magicHourKey = process.env["MAGIC_HOUR_API_KEY"];
-  if (!magicHourKey) {
-    console.warn(
-      "[Bot] MAGIC_HOUR_API_KEY is not set — video generation will be disabled.",
-    );
-  }
-
-  console.log("[Bot] GROQ_API_KEY defined: true");
-  console.log(`[Bot] TAVILY_API_KEY defined: ${Boolean(tavilyKey)}`);
-  console.log(`[Bot] OCR_SPACE_API_KEY defined: ${Boolean(ocrKey)}`);
-  console.log(`[Bot] MAGIC_HOUR_API_KEY defined: ${Boolean(magicHourKey)}`);
-  console.log(
-    "[Bot] Web search: enabled (multi-engine: Tavily + DuckDuckGo with fallback)",
-  );
-  console.log("[Bot] Image generation: enabled (Pollinations.ai, no key needed)");
-  console.log("[Bot] Video generation: enabled (Magic Hour API, /video command)");
-  console.log("[Bot] PDF reading: enabled (pdf-parse, no key needed)");
-  console.log(`[Bot] Model: ${GROQ_MODEL}`);
 
   const bot = new TelegramBot(token, { polling: true });
-  console.log("[Bot] Telegram bot started with long polling ✅");
+  console.log("[Bot] Telegram application polling active ✅");
 
-  // ------------------------------------------------------------------
-  // /video command — generate video via Magic Hour API
-  // Completely bypasses the LLM chain
-  // ------------------------------------------------------------------
+  // 1. Video Route Handling Block
   bot.onText(/^\/video\s+(.+)$/, async (msg, match) => {
     const chatId = msg.chat.id;
     const prompt = match![1]!.trim();
-
-    const senderName =
-      msg.from?.username ??
-      (`${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
-        String(chatId));
-
-    console.log(
-      `[Telegram] /video command from @${senderName} (chat ${chatId}): "${prompt}"`,
-    );
 
     try {
       await handleVideoGen(chatId, bot, prompt);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`[Bot] /video command error for chat ${chatId}: ${message}`);
-      console.error("[Bot] Full error:", err);
-      try {
-        await bot.sendMessage(chatId, FALLBACK_MESSAGE);
-      } catch (sendErr) {
-        console.error(
-          `[Bot] Failed to send fallback to chat ${chatId}:`,
-          sendErr,
-        );
-      }
+      console.error(`[Bot Exception Handling /video] Context: ${message}`);
+      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
     }
   });
 
-  // ------------------------------------------------------------------
-  // PDF document messages → extract + summarise / Q&A
-  // ------------------------------------------------------------------
+  // 2. Document Parsing Route Handling Block
   bot.on("document", async (msg) => {
     const chatId = msg.chat.id;
-    const senderName =
-      msg.from?.username ??
-      (`${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
-        String(chatId));
-
-    console.log(
-      `[Telegram] Document received from @${senderName} (chat ${chatId}): "${msg.document?.file_name ?? "unknown"}"`,
-    );
-
     try {
       await handleDocumentMessage(chatId, bot, msg);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[Bot] PDF flow error for chat ${chatId}: ${message}`);
-      console.error("[Bot] Full error:", err);
-      try {
-        await bot.sendMessage(chatId, FALLBACK_MESSAGE);
-      } catch (sendErr) {
-        console.error(
-          `[Bot] Failed to send fallback to chat ${chatId}:`,
-          sendErr,
-        );
-      }
+      console.error(`[Bot Exception Handling Document] Flow stopped unexpectedly.`);
+      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
     }
   });
 
-  // ------------------------------------------------------------------
-  // Photo messages → OCR flow
-  // ------------------------------------------------------------------
+  // 3. Photo Text Scanning Route Handling Block
   bot.on("photo", async (msg) => {
     const chatId = msg.chat.id;
-    const senderName =
-      msg.from?.username ??
-      (`${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
-        String(chatId));
-
-    console.log(
-      `[Telegram] Photo received from @${senderName} (chat ${chatId})`,
-    );
-
     if (!process.env["OCR_SPACE_API_KEY"]) {
-      await bot.sendMessage(
-        chatId,
-        "OCR is not configured on this bot right now. Please contact the bot owner.",
-      );
+      await bot.sendMessage(chatId, "OCR is not configured on this bot right now.");
       return;
     }
 
     try {
       await handlePhotoMessage(chatId, bot, msg);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[Bot] OCR flow error for chat ${chatId}: ${message}`);
-      try {
-        await bot.sendMessage(chatId, FALLBACK_MESSAGE);
-      } catch (sendErr) {
-        console.error(
-          `[Bot] Failed to send fallback to chat ${chatId}:`,
-          sendErr,
-        );
-      }
+      console.error(`[Bot Exception Handling Photo OCR] Engine processing failure.`);
+      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
     }
   });
 
-  // ------------------------------------------------------------------
-  // Text messages → image generation OR existing chat/search flow
-  // ------------------------------------------------------------------
+  // 4. Default Text Message Routing Engine (Core Dialogue + Image Branching)
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
     const userText = msg.text;
 
-    // Skip non-text messages (photos are handled by the "photo" listener above)
-    if (!userText) return;
-
-    // Skip /video commands (handled by bot.onText above)
-    if (userText.startsWith("/video")) return;
-
-    const senderName =
-      msg.from?.username ??
-      (`${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
-        String(chatId));
-
-    console.log(
-      `[Telegram] Message from @${senderName} (chat ${chatId}): "${userText}"`,
-    );
+    if (!userText || userText.startsWith("/video")) return;
 
     try {
-      // Route: image generation intent?
       const imagePrompt = extractImageGenPrompt(userText);
 
       if (imagePrompt !== null) {
-        console.log(
-          `[Router] Chat ${chatId} — intent: IMAGE_GEN, prompt: "${imagePrompt}"`,
-        );
+        console.log(`[Routing Execution] Parsing target string directly to Image Generator Engine.`);
         await handleImageGen(chatId, bot, imagePrompt);
         return;
       }
 
-      // Route: regular chat + optional web search
-      console.log(`[Router] Chat ${chatId} — intent: CHAT`);
+      console.log(`[Routing Execution] Context routed smoothly to Groq chat sequence.`);
       const reply = await handleUserMessage(chatId, userText);
 
-      const safe =
-        reply.length > 4000 ? reply.slice(0, 4000) + "\n\n…(truncated)" : reply;
-
+      const safe = reply.length > 4000 ? reply.slice(0, 4000) + "\n\n…(truncated)" : reply;
       await bot.sendMessage(chatId, safe);
-      console.log(`[Telegram] Reply sent to chat ${chatId} ✅`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(
-        `[Bot] Error processing message from chat ${chatId}: ${message}`,
-      );
-      console.error("[Bot] Full error:", err);
-
-      try {
-        await bot.sendMessage(chatId, FALLBACK_MESSAGE);
-      } catch (sendErr) {
-        console.error(
-          `[Bot] Failed to send fallback to chat ${chatId}:`,
-          sendErr,
-        );
-      }
+      console.error(`[Core Routing Failure Instance] Logging details: ${message}`);
+      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
     }
   });
 
   bot.on("polling_error", (err) => {
-    console.error("[Bot] Polling error:", err.message);
+    console.error("[Polling Warning Caught]", err.message);
   });
 }
