@@ -1,48 +1,85 @@
 import TelegramBot from "node-telegram-bot-api";
+import OpenAI from "openai";
+import { tavily, type TavilyClient } from "@tavily/core";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const MAX_HISTORY = 10; // max conversation turns kept per user
-const XAI_MODEL = "grok-3";
-const XAI_RESPONSES_URL = "https://api.x.ai/v1/responses";
+const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
+
 const FALLBACK_MESSAGE =
   "Sorry, I ran into a problem reaching my AI brain. Please try again in a moment! 🙏";
+
+/**
+ * System prompt for the search-decision step.
+ * Must return valid JSON matching SearchDecision.
+ */
+const SEARCH_DECISION_SYSTEM_PROMPT = `You are a routing assistant. Your only job is to decide whether answering the user's message requires live, up-to-date information from the internet.
+
+Rules:
+- If the question is about current events, news, real-time data, prices, sports scores, weather, or anything that changes frequently → needs_search: true
+- If the question can be answered accurately from general knowledge or the conversation so far → needs_search: false
+- Always provide a concise search_query (≤ 12 words) even when needs_search is false — it will be ignored in that case.
+
+Respond with ONLY a JSON object, no markdown, no explanation:
+{"needs_search": boolean, "search_query": string}`;
+
+/**
+ * System prompt for the final answer step.
+ */
+const ANSWER_SYSTEM_PROMPT = `You are a knowledgeable, helpful, and concise Telegram chatbot assistant. 
+Respond in the same language the user writes in.
+Be direct and informative. Avoid unnecessary padding.
+When search results are provided, use them to give accurate, up-to-date answers and acknowledge they come from live sources.`;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type ConversationTurn =
-  | { role: "user"; content: string }
-  | { role: "assistant"; content: string };
+type Role = "user" | "assistant";
 
-// xAI Responses API output shapes
-interface XAIOutputText {
-  type: "output_text";
-  text: string;
+interface ConversationTurn {
+  role: Role;
+  content: string;
 }
 
-interface XAIMessageOutput {
-  type: "message";
-  role: "assistant";
-  content: XAIOutputText[];
+interface SearchDecision {
+  needs_search: boolean;
+  search_query: string;
 }
 
-interface XAIToolCallOutput {
-  type: string; // "web_search_call" | "x_search_call" | …
-  id: string;
-  status: string;
+interface SearchResult {
+  title: string;
+  url: string;
+  content: string;
 }
 
-type XAIOutputItem = XAIMessageOutput | XAIToolCallOutput;
+// ---------------------------------------------------------------------------
+// Clients — lazily initialised on first use so env-var errors surface clearly
+// ---------------------------------------------------------------------------
 
-interface XAIResponse {
-  id: string;
-  output: XAIOutputItem[];
-  // error shape when the API returns 4xx/5xx with a JSON body
-  error?: { message: string; type: string };
+let groqClient: OpenAI | null = null;
+let tavilyClient: TavilyClient | null = null;
+
+function getGroqClient(): OpenAI {
+  if (!groqClient) {
+    const apiKey = process.env["GROQ_API_KEY"];
+    if (!apiKey) throw new Error("GROQ_API_KEY is not set");
+    groqClient = new OpenAI({ apiKey, baseURL: GROQ_BASE_URL });
+  }
+  return groqClient;
+}
+
+function getTavilyClient(): TavilyClient {
+  if (!tavilyClient) {
+    const apiKey = process.env["TAVILY_API_KEY"];
+    if (!apiKey) throw new Error("TAVILY_API_KEY is not set");
+    tavilyClient = tavily({ apiKey });
+  }
+  return tavilyClient;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,83 +95,212 @@ function getHistory(chatId: number): ConversationTurn[] {
   return conversationHistory.get(chatId)!;
 }
 
-function appendHistory(
-  chatId: number,
-  role: "user" | "assistant",
-  text: string,
-): void {
+function appendHistory(chatId: number, role: Role, content: string): void {
   const history = getHistory(chatId);
-  history.push({ role, content: text });
-  // Trim to the most recent MAX_HISTORY turns
+  history.push({ role, content });
   if (history.length > MAX_HISTORY) {
     history.splice(0, history.length - MAX_HISTORY);
   }
 }
 
 // ---------------------------------------------------------------------------
-// xAI Grok helper — Responses API with built-in web_search + x_search tools
+// Phase 1 — decide whether a web search is needed
 // ---------------------------------------------------------------------------
 
-async function askGrok(chatId: number, userText: string): Promise<string> {
-  const apiKey = process.env["XAI_API_KEY"];
-  if (!apiKey) throw new Error("XAI_API_KEY is not set");
+async function decideSearch(
+  chatId: number,
+  userText: string,
+): Promise<SearchDecision> {
+  const groq = getGroqClient();
 
-  // Append the user turn before building the payload so it's included
-  appendHistory(chatId, "user", userText);
-  const input = getHistory(chatId);
+  // Include recent history as context so the router can judge relevance
+  const historyContext = getHistory(chatId)
+    .slice(-4)
+    .map((t) => `${t.role === "user" ? "User" : "Bot"}: ${t.content}`)
+    .join("\n");
 
-  console.log(`[Grok] Sending prompt for chat ${chatId}: "${userText}"`);
+  const contextNote =
+    historyContext.length > 0
+      ? `\n\nRecent conversation:\n${historyContext}`
+      : "";
 
-  const res = await fetch(XAI_RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: XAI_MODEL,
-      input,
-      // Let Grok decide automatically when to search.
-      // web_search  — broad live web results
-      // x_search    — real-time posts/data from X (formerly Twitter)
-      tools: [{ type: "web_search" }, { type: "x_search" }],
-    }),
+  const response = await groq.chat.completions.create({
+    model: GROQ_MODEL,
+    messages: [
+      { role: "system", content: SEARCH_DECISION_SYSTEM_PROMPT },
+      { role: "user", content: `${userText}${contextNote}` },
+    ],
+    response_format: { type: "json_object" },
+    max_tokens: 80,
+    temperature: 0,
   });
 
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`xAI API ${res.status}: ${errBody}`);
+  const raw = response.choices[0]?.message?.content ?? "{}";
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.warn(
+      `[Router] Failed to parse search decision JSON for chat ${chatId}: ${raw}`,
+    );
+    return { needs_search: false, search_query: userText };
   }
 
-  const data = (await res.json()) as XAIResponse;
-
-  // Log every tool call that was made so we can see in console when searches happen
-  const toolCalls = data.output.filter((o) => o.type !== "message");
-  if (toolCalls.length > 0) {
-    const names = toolCalls.map((t) => t.type).join(", ");
-    console.log(`[Grok] Tools invoked for chat ${chatId}: ${names}`);
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof (parsed as Record<string, unknown>)["needs_search"] !== "boolean" ||
+    typeof (parsed as Record<string, unknown>)["search_query"] !== "string"
+  ) {
+    console.warn(
+      `[Router] Unexpected search decision shape for chat ${chatId}:`,
+      parsed,
+    );
+    return { needs_search: false, search_query: userText };
   }
 
-  // Extract text from the final message output item
-  const lastMessage = data.output
-    .filter((o): o is XAIMessageOutput => o.type === "message")
-    .at(-1);
+  const decision = parsed as SearchDecision;
+  console.log(
+    `[Router] Chat ${chatId} — needs_search: ${decision.needs_search}, query: "${decision.search_query}"`,
+  );
+  return decision;
+}
 
-  const replyText =
-    lastMessage?.content
-      .filter((c) => c.type === "output_text")
-      .map((c) => c.text)
-      .join("") ||
+// ---------------------------------------------------------------------------
+// Phase 2 — run Tavily web search
+// ---------------------------------------------------------------------------
+
+async function runWebSearch(query: string): Promise<SearchResult[]> {
+  const client = getTavilyClient();
+
+  const response = await client.search(query, {
+    searchDepth: "basic",
+    maxResults: 5,
+    includeAnswer: false,
+  });
+
+  const results: SearchResult[] = (response.results ?? []).map((r) => ({
+    title: r.title ?? "",
+    url: r.url ?? "",
+    content: r.content ?? "",
+  }));
+
+  console.log(`[Tavily] "${query}" → ${results.length} result(s)`);
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — ask Groq for the final answer (with optional search context)
+// ---------------------------------------------------------------------------
+
+async function getFinalAnswer(
+  chatId: number,
+  userText: string,
+  searchResults: SearchResult[],
+): Promise<{ reply: string; sources: string[] }> {
+  const groq = getGroqClient();
+  const history = getHistory(chatId);
+
+  // Build the OpenAI-compatible messages array
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: "system", content: ANSWER_SYSTEM_PROMPT },
+  ];
+
+  // Inject conversation history (everything except the current turn)
+  for (const turn of history) {
+    messages.push({ role: turn.role, content: turn.content });
+  }
+
+  // If we have search results, prepend them to the user's message
+  let effectiveUserContent = userText;
+  const sources: string[] = [];
+
+  if (searchResults.length > 0) {
+    const searchContext = searchResults
+      .map(
+        (r, i) =>
+          `[Source ${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content.slice(0, 600)}`,
+      )
+      .join("\n\n---\n\n");
+
+    effectiveUserContent =
+      `The following live web search results were retrieved to help you answer. ` +
+      `Use them to give an accurate, up-to-date response.\n\n` +
+      `=== SEARCH RESULTS ===\n${searchContext}\n=== END OF RESULTS ===\n\n` +
+      `User question: ${userText}`;
+
+    sources.push(...searchResults.map((r) => r.url).filter(Boolean));
+  }
+
+  messages.push({ role: "user", content: effectiveUserContent });
+
+  const completion = await groq.chat.completions.create({
+    model: GROQ_MODEL,
+    messages,
+    max_tokens: 1024,
+    temperature: 0.7,
+  });
+
+  const reply =
+    completion.choices[0]?.message?.content?.trim() ||
     "I got an empty response — please try again.";
 
   console.log(
-    `[Grok] Reply for chat ${chatId}: "${replyText.slice(0, 120)}${replyText.length > 120 ? "…" : ""}"`,
+    `[Groq] Reply for chat ${chatId}: "${reply.slice(0, 120)}${reply.length > 120 ? "…" : ""}"`,
   );
 
-  // Store only the final plain-text reply in history (not tool-call artefacts)
-  appendHistory(chatId, "assistant", replyText);
+  return { reply, sources };
+}
 
-  return replyText;
+// ---------------------------------------------------------------------------
+// Orchestrator — ties the three phases together
+// ---------------------------------------------------------------------------
+
+async function handleUserMessage(
+  chatId: number,
+  userText: string,
+): Promise<string> {
+  // Record the user turn before any async work
+  appendHistory(chatId, "user", userText);
+
+  // Phase 1: routing decision
+  const decision = await decideSearch(chatId, userText);
+
+  // Phase 2: optional web search
+  let searchResults: SearchResult[] = [];
+  if (decision.needs_search) {
+    try {
+      searchResults = await runWebSearch(decision.search_query);
+    } catch (searchErr: unknown) {
+      const msg =
+        searchErr instanceof Error ? searchErr.message : String(searchErr);
+      console.error(`[Tavily] Search failed for chat ${chatId}: ${msg}`);
+      // Proceed without search results — graceful degradation
+    }
+  }
+
+  // Phase 3: final answer
+  const { reply, sources } = await getFinalAnswer(
+    chatId,
+    userText,
+    searchResults,
+  );
+
+  // Append sources block when available
+  let finalReply = reply;
+  if (sources.length > 0) {
+    const sourceLines = sources
+      .slice(0, 5)
+      .map((url, i) => `${i + 1}. ${url}`)
+      .join("\n");
+    finalReply = `${reply}\n\n🔗 *Sources:*\n${sourceLines}`;
+  }
+
+  // Record the assistant turn in history (without the source footer)
+  appendHistory(chatId, "assistant", reply);
+
+  return finalReply;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,17 +316,25 @@ export function startBot(): void {
     return;
   }
 
-  const xaiKey = process.env["XAI_API_KEY"];
-  if (!xaiKey) {
+  const groqKey = process.env["GROQ_API_KEY"];
+  if (!groqKey) {
     console.error(
-      "[Bot] XAI_API_KEY is not set — Telegram bot will NOT start.",
+      "[Bot] GROQ_API_KEY is not set — Telegram bot will NOT start.",
     );
     return;
   }
 
-  console.log(`[Bot] XAI_API_KEY confirmed — length: ${xaiKey.length}`);
+  const tavilyKey = process.env["TAVILY_API_KEY"];
+  if (!tavilyKey) {
+    console.warn(
+      "[Bot] TAVILY_API_KEY is not set — web search will be disabled.",
+    );
+  }
 
-  // Long polling — no webhook URL needed
+  console.log("[Bot] GROQ_API_KEY defined: true");
+  console.log(`[Bot] TAVILY_API_KEY defined: ${Boolean(tavilyKey)}`);
+  console.log(`[Bot] Model: ${GROQ_MODEL}`);
+
   const bot = new TelegramBot(token, { polling: true });
   console.log("[Bot] Telegram bot started with long polling ✅");
 
@@ -169,28 +343,23 @@ export function startBot(): void {
     const userText = msg.text;
     const senderName =
       msg.from?.username ??
-      (
-        `${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
-        String(chatId)
-      );
+      (`${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
+        String(chatId));
 
-    // Ignore non-text messages (photos, stickers, voice notes, etc.)
     if (!userText) return;
 
     console.log(
-      `[Telegram] Message received — from: @${senderName} (chat ${chatId}) | text: "${userText}"`,
+      `[Telegram] Message from @${senderName} (chat ${chatId}): "${userText}"`,
     );
 
     try {
-      const reply = await askGrok(chatId, userText);
+      const reply = await handleUserMessage(chatId, userText);
 
-      // Telegram hard-limits messages to 4096 chars; truncate gracefully
+      // Telegram hard-limits messages to 4096 chars
       const safe =
-        reply.length > 4000
-          ? reply.slice(0, 4000) + "\n\n…(truncated)"
-          : reply;
+        reply.length > 4000 ? reply.slice(0, 4000) + "\n\n…(truncated)" : reply;
 
-      await bot.sendMessage(chatId, safe);
+      await bot.sendMessage(chatId, safe, { parse_mode: "Markdown" });
       console.log(`[Telegram] Reply sent to chat ${chatId} ✅`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -201,17 +370,15 @@ export function startBot(): void {
 
       try {
         await bot.sendMessage(chatId, FALLBACK_MESSAGE);
-        console.log(`[Telegram] Fallback message sent to chat ${chatId}`);
       } catch (sendErr) {
         console.error(
-          `[Bot] Failed to send fallback message to chat ${chatId}:`,
+          `[Bot] Failed to send fallback to chat ${chatId}:`,
           sendErr,
         );
       }
     }
   });
 
-  // Log polling errors without crashing the process
   bot.on("polling_error", (err) => {
     console.error("[Bot] Polling error:", err.message);
   });
