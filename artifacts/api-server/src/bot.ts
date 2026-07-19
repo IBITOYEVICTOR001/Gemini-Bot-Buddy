@@ -463,24 +463,23 @@ async function handleUserMessage(
 }
 
 // ---------------------------------------------------------------------------
-// NEW: Image generation via Pollinations.ai (no API key required)
+// NEW: Image generation via Pollinations.ai (UPDATED: Path-based parameters)
 // ---------------------------------------------------------------------------
 
 /**
  * Builds a Pollinations.ai image URL and sends the resulting photo to the chat.
- * Pollinations streams the image directly from the URL, so sendPhoto handles it.
+ * Uses a clean path-based structure ending in .jpg so Telegram accepts the URL natively.
  */
 async function handleImageGen(
   chatId: number,
   bot: TelegramBot,
   prompt: string,
 ): Promise<void> {
-  // Use a fixed seed derived from current time for reproducible-per-request uniqueness
   const seed = Date.now() % 1_000_000;
   const encodedPrompt = encodeURIComponent(prompt);
-  const imageUrl =
-    `${POLLINATIONS_BASE_URL}${encodedPrompt}` +
-    `?width=1024&height=1024&nologo=true&seed=${seed}`;
+  
+  // Clean path-based URL structure ending in .jpg to avoid query string parsing quirks in Telegram
+  const imageUrl = `${POLLINATIONS_BASE_URL}${encodedPrompt}.jpg?width=1024&height=1024&nologo=true&seed=${seed}`;
 
   console.log(
     `[ImageGen] Chat ${chatId} — prompt: "${prompt}" | URL: ${imageUrl}`,
@@ -495,13 +494,12 @@ async function handleImageGen(
 }
 
 // ---------------------------------------------------------------------------
-// NEW: Video generation via Magic Hour API
+// NEW: Video generation via Magic Hour API (UPDATED: Buffer loading & Dynamic URL capture)
 // ---------------------------------------------------------------------------
 
 /**
- * Generates a video using the Magic Hour API and sends it to the chat.
- * Uses text-to-video generation with waitForCompletion enabled.
- * Completely bypasses the LLM chain.
+ * Generates a video using the Magic Hour API and uploads it as a file buffer.
+ * Bypasses direct URL parsing issues within Telegram by pulling files locally first.
  */
 async function handleVideoGen(
   chatId: number,
@@ -527,18 +525,27 @@ async function handleVideoGen(
       waitForCompletion: true
     });
 
-    // Extract video URL from response
-    const videoUrl = (response as unknown as Record<string, unknown>).videoUrl;
+    // Safely cast response object to pull video asset target property variations
+    const data = response as any;
+    const videoUrl = data.videoUrl || data.download_url || (data.result && data.result.videoUrl);
+    
     if (!videoUrl || typeof videoUrl !== "string") {
-      throw new Error("Invalid response: missing or invalid videoUrl");
+      throw new Error(`Invalid response structure: missing videoUrl. Raw data: ${JSON.stringify(data)}`);
     }
 
-    console.log(
-      `[VideoGen] Video generated for chat ${chatId} — URL: ${videoUrl}`,
-    );
+    console.log(`[VideoGen] Downloading asset from Magic Hour CDN into server memory...`);
+    
+    const videoRes = await fetch(videoUrl);
+    if (!videoRes.ok) throw new Error(`Could not reach video asset endpoint at ${videoUrl}`);
+    const videoBuffer = Buffer.from(await videoRes.arrayBuffer());
 
-    await bot.sendVideo(chatId, videoUrl, {
+    console.log(`[VideoGen] Uploading static binary data buffer (${videoBuffer.length} bytes) to Telegram...`);
+
+    await bot.sendVideo(chatId, videoBuffer, {
       caption: `Here is your video: "${prompt}"`,
+    }, {
+      filename: "video.mp4",
+      contentType: "video/mp4"
     });
 
     console.log(`[VideoGen] Video sent to chat ${chatId} ✅`);
