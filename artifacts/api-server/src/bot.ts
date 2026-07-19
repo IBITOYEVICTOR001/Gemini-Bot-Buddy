@@ -109,42 +109,6 @@ function extractImageGenPrompt(text: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Video generation intent detection
-// ---------------------------------------------------------------------------
-
-/**
- * Verbs and nouns that signal a video-generation request.
- */
-const VIDEO_GEN_VERB_RE =
-  /\b(generate|create|make|produce|render|show me)\b/i;
-
-const VIDEO_GEN_NOUN_RE =
-  /\b(video|clip|animation|film|footage|movie)\b/i;
-
-/**
- * Returns the cleaned video prompt if the text is a video-generation request,
- * or null if it is not a video request.
- */
-function extractVideoGenPrompt(text: string): string | null {
-  if (!VIDEO_GEN_VERB_RE.test(text)) return null;
-  if (!VIDEO_GEN_NOUN_RE.test(text)) return null;
-
-  // Strip the generation preamble to get just the descriptive subject
-  const stripped = text
-    .replace(
-      /^(generate|create|make|produce|render)\s+(me\s+)?/i,
-      "",
-    )
-    .replace(
-      /^(a\s+)?(video|clip|animation|film|footage|movie)\s+(of\s+)?/i,
-      "",
-    )
-    .trim();
-
-  return stripped.length > 0 ? stripped : text.trim();
-}
-
-// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -537,6 +501,7 @@ async function handleImageGen(
 /**
  * Generates a video using the Magic Hour API and sends it to the chat.
  * Uses text-to-video generation with waitForCompletion enabled.
+ * Completely bypasses the LLM chain.
  */
 async function handleVideoGen(
   chatId: number,
@@ -706,7 +671,7 @@ async function handlePhotoMessage(
   // If the user attached a caption (question/instruction), route to Groq
   if (caption.length > 0) {
     const groq = getGroqClient();
-    const userContent = `OCR extracted text:\n\"\"\"\n${extractedText}\n\"\"\"\n\nUser instruction: ${caption}`;
+    const userContent = `OCR extracted text:\n"""\n${extractedText}\n"""\n\nUser instruction: ${caption}`;
 
     console.log(
       `[OCR] Caption detected — passing extracted text + caption to Groq for chat ${chatId}`,
@@ -1017,12 +982,46 @@ export function startBot(): void {
     "[Bot] Web search: enabled (multi-engine: Tavily + DuckDuckGo with fallback)",
   );
   console.log("[Bot] Image generation: enabled (Pollinations.ai, no key needed)");
-  console.log("[Bot] Video generation: enabled (Magic Hour API)");
+  console.log("[Bot] Video generation: enabled (Magic Hour API, /video command)");
   console.log("[Bot] PDF reading: enabled (pdf-parse, no key needed)");
   console.log(`[Bot] Model: ${GROQ_MODEL}`);
 
   const bot = new TelegramBot(token, { polling: true });
   console.log("[Bot] Telegram bot started with long polling ✅");
+
+  // ------------------------------------------------------------------
+  // /video command — generate video via Magic Hour API
+  // Completely bypasses the LLM chain
+  // ------------------------------------------------------------------
+  bot.onText(/^\/video\s+(.+)$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const prompt = match![1]!.trim();
+
+    const senderName =
+      msg.from?.username ??
+      (`${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
+        String(chatId));
+
+    console.log(
+      `[Telegram] /video command from @${senderName} (chat ${chatId}): "${prompt}"`,
+    );
+
+    try {
+      await handleVideoGen(chatId, bot, prompt);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[Bot] /video command error for chat ${chatId}: ${message}`);
+      console.error("[Bot] Full error:", err);
+      try {
+        await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+      } catch (sendErr) {
+        console.error(
+          `[Bot] Failed to send fallback to chat ${chatId}:`,
+          sendErr,
+        );
+      }
+    }
+  });
 
   // ------------------------------------------------------------------
   // PDF document messages → extract + summarise / Q&A
@@ -1094,7 +1093,7 @@ export function startBot(): void {
   });
 
   // ------------------------------------------------------------------
-  // Text messages → video generation OR image generation OR existing chat/search flow
+  // Text messages → image generation OR existing chat/search flow
   // ------------------------------------------------------------------
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
@@ -1102,6 +1101,9 @@ export function startBot(): void {
 
     // Skip non-text messages (photos are handled by the "photo" listener above)
     if (!userText) return;
+
+    // Skip /video commands (handled by bot.onText above)
+    if (userText.startsWith("/video")) return;
 
     const senderName =
       msg.from?.username ??
@@ -1113,16 +1115,6 @@ export function startBot(): void {
     );
 
     try {
-      // Route: video generation intent?
-      const videoPrompt = extractVideoGenPrompt(userText);
-      if (videoPrompt !== null) {
-        console.log(
-          `[Router] Chat ${chatId} — intent: VIDEO_GEN, prompt: "${videoPrompt}"`,
-        );
-        await handleVideoGen(chatId, bot, videoPrompt);
-        return;
-      }
-
       // Route: image generation intent?
       const imagePrompt = extractImageGenPrompt(userText);
 
