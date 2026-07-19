@@ -287,14 +287,14 @@ async function handleUserMessage(
     searchResults,
   );
 
-  // Append sources block when available
+  // Append sources block when available (plain text — no Markdown parse_mode)
   let finalReply = reply;
   if (sources.length > 0) {
     const sourceLines = sources
       .slice(0, 5)
       .map((url, i) => `${i + 1}. ${url}`)
       .join("\n");
-    finalReply = `${reply}\n\n🔗 *Sources:*\n${sourceLines}`;
+    finalReply = `${reply}\n\n🔗 Sources:\n${sourceLines}`;
   }
 
   // Record the assistant turn in history (without the source footer)
@@ -359,7 +359,7 @@ export function startBot(): void {
       const safe =
         reply.length > 4000 ? reply.slice(0, 4000) + "\n\n…(truncated)" : reply;
 
-      await bot.sendMessage(chatId, safe, { parse_mode: "Markdown" });
+      await bot.sendMessage(chatId, safe);
       console.log(`[Telegram] Reply sent to chat ${chatId} ✅`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
