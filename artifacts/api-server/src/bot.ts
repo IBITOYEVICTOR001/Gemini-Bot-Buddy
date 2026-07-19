@@ -12,7 +12,7 @@ const GROQ_MODEL = "llama-3.3-70b-versatile";
 const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 
 const OCR_SPACE_API_URL = "https://api.ocr.space/parse/image";
-const POLLINATIONS_BASE_URL = "https://image.pollinations.ai/prompt";
+const POLLINATIONS_BASE_URL = "https://gen.pollinations.ai/image/";
 
 // PDF limits
 /** Telegram Bot API hard cap for file downloads */
@@ -44,10 +44,10 @@ const ANSWER_SYSTEM_PROMPT = `You are LadexAIBot, a helpful, friendly, and knowl
 
 1. Be concise by default. Give clear, direct answers. Only go longer when the question genuinely needs depth (e.g. explanations, tutorials, comparisons).
 2. Use natural, conversational language — avoid sounding robotic or overly formal unless the user's tone suggests they want that.
-3. When uncertain about a fact, say so clearly rather than guessing confidently. If web search results are available, prioritize those over your own assumptions for anything time-sensitive or factual.
+3. When uncertain about a fact, say so clearly rather than guessing confidently. If web search results are available, prioritize those over your own assumptions for anything time-sensitive or fact-dependent.
 4. Format responses for readability on a phone screen: short paragraphs, occasional bullet points for lists, avoid giant walls of text.
 5. Match the user's energy — if they're casual, be casual; if they're asking something technical or serious, be precise and thorough.
-6. If a request is ambiguous, make a reasonable assumption and answer helpfully rather than asking clarifying questions for every little thing — but ask if the ambiguity is significant enough that guessing wrong would waste the user's time.
+6. If a request is ambiguous, make a reasonable assumption and answer helpfully rather than asking clarifying questions for every little thing — but ask if the ambiguity is significant enough that you can't reasonably guess.
 7. Don't over-apologize or add unnecessary disclaimers. Be direct and confident where you have good information.
 8. You can generate images (say so if asked "can you make images") and read text from photos sent to you (OCR) — mention these capabilities naturally if relevant, don't force it.`;
 
@@ -399,8 +399,9 @@ async function handleImageGen(
 ): Promise<void> {
   // Use a fixed seed derived from current time for reproducible-per-request uniqueness
   const seed = Date.now() % 1_000_000;
+  const encodedPrompt = encodeURIComponent(prompt);
   const imageUrl =
-    `${POLLINATIONS_BASE_URL}/${encodeURIComponent(prompt)}` +
+    `${POLLINATIONS_BASE_URL}${encodedPrompt}` +
     `?width=1024&height=1024&nologo=true&seed=${seed}`;
 
   console.log(
