@@ -456,6 +456,7 @@ async function handleImageGen(
   // Download the image as a buffer to avoid Telegram's URL-fetch timeout (400 Bad Request)
   const response = await axios.get<ArrayBuffer>(imageUrl, {
     responseType: "arraybuffer",
+    timeout: 15000,
     headers: {
       "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
     },
@@ -882,7 +883,7 @@ async function handleDocumentMessage(
 // Bot Entry / Event Handlers
 // ---------------------------------------------------------------------------
 
-export function startBot(): void {
+export async function startBot(): Promise<void> {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
   if (!token) {
     console.error("[Bot] TELEGRAM_BOT_TOKEN missing — Execution cancelled.");
@@ -894,7 +895,9 @@ export function startBot(): void {
     return;
   }
 
-  const bot = new TelegramBot(token, { polling: true });
+  const bot = new TelegramBot(token, { polling: false });
+  await bot.deleteWebhook({ drop_pending_updates: true });
+  bot.startPolling({ restart: true });
   console.log("[Bot] Telegram application polling active ✅");
 
   // 1. Video Route Handling Block
