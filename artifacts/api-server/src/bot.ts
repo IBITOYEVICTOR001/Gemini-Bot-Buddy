@@ -311,9 +311,11 @@ async function getFinalAnswer(
       .join("\n\n---\n\n");
 
     effectiveUserContent =
-      `The following live web search results were retrieved to help you answer. ` +
-      `Use them to give an accurate, up-to-date response.\n\n` +
-      `=== SEARCH RESULTS ===\n${searchContext}\n=== END OF RESULTS ===\n\n` +
+      `The following live web search results were retrieved for this question. ` +
+      `These are your primary source — state what they say directly and confidently. ` +
+      `Do NOT hedge or express doubt when the results clearly address the question. ` +
+      `Only use uncertain language if the results are genuinely vague, contradictory, or don't cover the question.\n\n` +
+      `=== LIVE SEARCH RESULTS ===\n${searchContext}\n=== END OF RESULTS ===\n\n` +
       `User question: ${userText}`;
 
     sources.push(...searchResults.map((r) => r.url).filter(Boolean));
@@ -325,7 +327,7 @@ async function getFinalAnswer(
     model: GROQ_MODEL,
     messages,
     max_tokens: 1024,
-    temperature: 0.7,
+    temperature: 0.5,
   });
 
   const reply =
