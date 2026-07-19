@@ -1,5 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import OpenAI from "openai";
+import { Client } from "magic-hour";
 import { tavily, type TavilyClient } from "@tavily/core";
 import { PDFParse } from "pdf-parse";
 import { search as duckDuckGoSearch } from "duck-duck-scrape";
@@ -45,10 +46,10 @@ const ANSWER_SYSTEM_PROMPT = `You are LadexAIBot, a helpful, friendly, and knowl
 
 1. Be concise by default. Give clear, direct answers. Only go longer when the question genuinely needs depth (e.g. explanations, tutorials, comparisons).
 2. Use natural, conversational language — avoid sounding robotic or overly formal unless the user's tone suggests they want that.
-3. When uncertain about a fact, say so clearly rather than guessing confidently. If web search results are available, prioritize those over your own assumptions for anything time-sensitive or fact-dependent.
+3. When uncertain about a fact, say so clearly rather than guessing confidently. If web search results are available, prioritize those over your own assumptions for anything time-sensitive or fact[...]
 4. Format responses for readability on a phone screen: short paragraphs, occasional bullet points for lists, avoid giant walls of text.
 5. Match the user's energy — if they're casual, be casual; if they're asking something technical or serious, be precise and thorough.
-6. If a request is ambiguous, make a reasonable assumption and answer helpfully rather than asking clarifying questions for every little thing — but ask if the ambiguity is significant enough that you can't reasonably guess.
+6. If a request is ambiguous, make a reasonable assumption and answer helpfully rather than asking clarifying questions for every little thing — but ask if the ambiguity is significant enough th[...]
 7. Don't over-apologize or add unnecessary disclaimers. Be direct and confident where you have good information.
 8. You can generate images (say so if asked "can you make images") and read text from photos sent to you (OCR) — mention these capabilities naturally if relevant, don't force it.`;
 
@@ -108,6 +109,42 @@ function extractImageGenPrompt(text: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Video generation intent detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Verbs and nouns that signal a video-generation request.
+ */
+const VIDEO_GEN_VERB_RE =
+  /\b(generate|create|make|produce|render|show me)\b/i;
+
+const VIDEO_GEN_NOUN_RE =
+  /\b(video|clip|animation|film|footage|movie)\b/i;
+
+/**
+ * Returns the cleaned video prompt if the text is a video-generation request,
+ * or null if it is not a video request.
+ */
+function extractVideoGenPrompt(text: string): string | null {
+  if (!VIDEO_GEN_VERB_RE.test(text)) return null;
+  if (!VIDEO_GEN_NOUN_RE.test(text)) return null;
+
+  // Strip the generation preamble to get just the descriptive subject
+  const stripped = text
+    .replace(
+      /^(generate|create|make|produce|render)\s+(me\s+)?/i,
+      "",
+    )
+    .replace(
+      /^(a\s+)?(video|clip|animation|film|footage|movie)\s+(of\s+)?/i,
+      "",
+    )
+    .trim();
+
+  return stripped.length > 0 ? stripped : text.trim();
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -154,6 +191,7 @@ interface OcrSpaceResponse {
 
 let groqClient: OpenAI | null = null;
 let tavilyClient: TavilyClient | null = null;
+let magicHourClient: Client | null = null;
 
 function getGroqClient(): OpenAI {
   if (!groqClient) {
@@ -171,6 +209,15 @@ function getTavilyClient(): TavilyClient {
     tavilyClient = tavily({ apiKey });
   }
   return tavilyClient;
+}
+
+function getMagicHourClient(): Client {
+  if (!magicHourClient) {
+    const apiKey = process.env["MAGIC_HOUR_API_KEY"];
+    if (!apiKey) throw new Error("MAGIC_HOUR_API_KEY is not set");
+    magicHourClient = new Client({ apiKey });
+  }
+  return magicHourClient;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +531,59 @@ async function handleImageGen(
 }
 
 // ---------------------------------------------------------------------------
+// NEW: Video generation via Magic Hour API
+// ---------------------------------------------------------------------------
+
+/**
+ * Generates a video using the Magic Hour API and sends it to the chat.
+ * Uses text-to-video generation with waitForCompletion enabled.
+ */
+async function handleVideoGen(
+  chatId: number,
+  bot: TelegramBot,
+  prompt: string,
+): Promise<void> {
+  console.log(
+    `[VideoGen] Chat ${chatId} — prompt: "${prompt}" | generating video...`,
+  );
+
+  await bot.sendChatAction(chatId, "upload_video");
+
+  try {
+    const magicHour = getMagicHourClient();
+
+    const response = await magicHour.v1.textToVideo.generate({
+      prompt,
+      waitForCompletion: true,
+    });
+
+    // Extract video URL from response
+    const videoUrl = (response as unknown as Record<string, unknown>)
+      .videoUrl;
+    if (!videoUrl || typeof videoUrl !== "string") {
+      throw new Error("Invalid response: missing or invalid videoUrl");
+    }
+
+    console.log(
+      `[VideoGen] Video generated for chat ${chatId} — URL: ${videoUrl}`,
+    );
+
+    await bot.sendVideo(chatId, videoUrl, {
+      caption: `Here is your video: "${prompt}"`,
+    });
+
+    console.log(`[VideoGen] Video sent to chat ${chatId} ✅`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[VideoGen] Generation failed for chat ${chatId}: ${msg}`);
+    await bot.sendMessage(
+      chatId,
+      "Sorry, I couldn't generate the video. Please try again later.",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // NEW: OCR via OCR.space API
 // ---------------------------------------------------------------------------
 
@@ -606,7 +706,7 @@ async function handlePhotoMessage(
   // If the user attached a caption (question/instruction), route to Groq
   if (caption.length > 0) {
     const groq = getGroqClient();
-    const userContent = `OCR extracted text:\n"""\n${extractedText}\n"""\n\nUser instruction: ${caption}`;
+    const userContent = `OCR extracted text:\n\"\"\"\n${extractedText}\n\"\"\"\n\nUser instruction: ${caption}`;
 
     console.log(
       `[OCR] Caption detected — passing extracted text + caption to Groq for chat ${chatId}`,
@@ -902,13 +1002,22 @@ export function startBot(): void {
     );
   }
 
+  const magicHourKey = process.env["MAGIC_HOUR_API_KEY"];
+  if (!magicHourKey) {
+    console.warn(
+      "[Bot] MAGIC_HOUR_API_KEY is not set — video generation will be disabled.",
+    );
+  }
+
   console.log("[Bot] GROQ_API_KEY defined: true");
   console.log(`[Bot] TAVILY_API_KEY defined: ${Boolean(tavilyKey)}`);
   console.log(`[Bot] OCR_SPACE_API_KEY defined: ${Boolean(ocrKey)}`);
+  console.log(`[Bot] MAGIC_HOUR_API_KEY defined: ${Boolean(magicHourKey)}`);
   console.log(
     "[Bot] Web search: enabled (multi-engine: Tavily + DuckDuckGo with fallback)",
   );
   console.log("[Bot] Image generation: enabled (Pollinations.ai, no key needed)");
+  console.log("[Bot] Video generation: enabled (Magic Hour API)");
   console.log("[Bot] PDF reading: enabled (pdf-parse, no key needed)");
   console.log(`[Bot] Model: ${GROQ_MODEL}`);
 
@@ -985,7 +1094,7 @@ export function startBot(): void {
   });
 
   // ------------------------------------------------------------------
-  // Text messages → image generation OR existing chat/search flow
+  // Text messages → video generation OR image generation OR existing chat/search flow
   // ------------------------------------------------------------------
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
@@ -1004,6 +1113,16 @@ export function startBot(): void {
     );
 
     try {
+      // Route: video generation intent?
+      const videoPrompt = extractVideoGenPrompt(userText);
+      if (videoPrompt !== null) {
+        console.log(
+          `[Router] Chat ${chatId} — intent: VIDEO_GEN, prompt: "${videoPrompt}"`,
+        );
+        await handleVideoGen(chatId, bot, videoPrompt);
+        return;
+      }
+
       // Route: image generation intent?
       const imagePrompt = extractImageGenPrompt(userText);
 
