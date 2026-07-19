@@ -29,6 +29,12 @@ async function buildAll() {
     // - use path traversal to read files (e.g. @google-cloud/secret-manager loads sibling .proto files)
     external: [
       "*.node",
+      // pdf-parse v2 pulls in pdfjs-dist (heavy, uses dynamic imports) and
+      // @napi-rs/canvas (native). Both must stay external so esbuild doesn't
+      // attempt to bundle them — they're resolved from node_modules at runtime.
+      "pdf-parse",
+      "pdfjs-dist",
+      "@napi-rs/canvas",
       "sharp",
       "better-sqlite3",
       "sqlite3",

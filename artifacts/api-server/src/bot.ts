@@ -1,6 +1,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import OpenAI from "openai";
 import { tavily, type TavilyClient } from "@tavily/core";
+import { PDFParse } from "pdf-parse";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -12,6 +13,12 @@ const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 
 const OCR_SPACE_API_URL = "https://api.ocr.space/parse/image";
 const POLLINATIONS_BASE_URL = "https://image.pollinations.ai/prompt";
+
+// PDF limits
+/** Telegram Bot API hard cap for file downloads */
+const PDF_MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
+/** Characters fed into Groq — keeps prompt within context window */
+const PDF_MAX_TEXT_CHARS = 15_000;
 
 const FALLBACK_MESSAGE =
   "Sorry, I ran into a problem reaching my AI brain. Please try again in a moment! 🙏";
@@ -50,6 +57,15 @@ const ANSWER_SYSTEM_PROMPT = `You are LadexAIBot, a helpful, friendly, and knowl
 const OCR_ANSWER_SYSTEM_PROMPT = `You are a helpful Telegram chatbot assistant. The user has sent you an image. 
 The text extracted from that image via OCR is provided below, followed by the user's question or instruction about it.
 Answer clearly and concisely based on the extracted text.`;
+
+/**
+ * System prompt used when Groq is asked to reason about PDF text.
+ */
+const PDF_ANSWER_SYSTEM_PROMPT = `You are LadexAIBot. The user has sent you a PDF document.
+The text extracted from the document is provided below.
+When answering questions, be accurate and reference relevant parts of the document.
+When summarising, be concise — cover the main points in a way that fits a phone screen.
+Format for readability: short paragraphs, bullet points for lists.`;
 
 // ---------------------------------------------------------------------------
 // Image generation intent detection
@@ -110,6 +126,12 @@ interface SearchResult {
   title: string;
   url: string;
   content: string;
+}
+
+interface PdfExtractResult {
+  text: string;
+  pages: number;
+  truncated: boolean;
 }
 
 interface OcrSpaceParsedResult {
@@ -561,6 +583,221 @@ async function handlePhotoMessage(
 }
 
 // ---------------------------------------------------------------------------
+// NEW: PDF text extraction via pdf-parse v2
+// ---------------------------------------------------------------------------
+
+/**
+ * Parses a PDF buffer and returns the extracted text, page count, and whether
+ * the text was truncated to fit within PDF_MAX_TEXT_CHARS.
+ */
+async function runPdfExtract(buffer: Buffer): Promise<PdfExtractResult> {
+  const parser = new PDFParse({ data: buffer });
+  try {
+    const result = await parser.getText();
+    const raw = result.text.trim();
+    const truncated = raw.length > PDF_MAX_TEXT_CHARS;
+    const text = truncated ? raw.slice(0, PDF_MAX_TEXT_CHARS) : raw;
+
+    console.log(
+      `[PDF] Extracted ${raw.length} chars across ${result.total} page(s)` +
+        (truncated ? ` — truncated to ${PDF_MAX_TEXT_CHARS} chars for Groq` : ""),
+    );
+
+    return { text, pages: result.total, truncated };
+  } finally {
+    await parser.destroy();
+  }
+}
+
+/**
+ * Sends a long text reply across multiple Telegram messages if it exceeds
+ * the 4 000-character per-message limit.
+ */
+async function sendLongMessage(
+  bot: TelegramBot,
+  chatId: number,
+  text: string,
+): Promise<void> {
+  const CHUNK = 4000;
+  if (text.length <= CHUNK) {
+    await bot.sendMessage(chatId, text);
+    return;
+  }
+  let offset = 0;
+  let part = 1;
+  const total = Math.ceil(text.length / CHUNK);
+  while (offset < text.length) {
+    const slice = text.slice(offset, offset + CHUNK);
+    await bot.sendMessage(chatId, `[Part ${part}/${total}]\n\n${slice}`);
+    offset += CHUNK;
+    part++;
+  }
+}
+
+/**
+ * Full handler for PDF document messages:
+ * 1. Guards file-size and mime-type.
+ * 2. Downloads the file from Telegram.
+ * 3. Extracts text with pdf-parse.
+ * 4. If a caption is present → Groq Q&A. Otherwise → Groq auto-summary.
+ */
+async function handleDocumentMessage(
+  chatId: number,
+  bot: TelegramBot,
+  msg: TelegramBot.Message,
+): Promise<void> {
+  const doc = msg.document!;
+  const caption = msg.caption?.trim() ?? "";
+  const fileName = doc.file_name ?? "document.pdf";
+  const fileSize = doc.file_size ?? 0;
+
+  console.log(
+    `[PDF] Document received in chat ${chatId} — file: "${fileName}", ` +
+      `size: ${(fileSize / 1024).toFixed(1)} KB` +
+      (caption ? `, caption: "${caption}"` : ", no caption"),
+  );
+
+  // Guard: only handle PDFs
+  const isPdf =
+    doc.mime_type === "application/pdf" ||
+    fileName.toLowerCase().endsWith(".pdf");
+  if (!isPdf) {
+    await bot.sendMessage(
+      chatId,
+      "I can only read PDF files right now. Send me a .pdf document and I'll extract and analyse its text.",
+    );
+    return;
+  }
+
+  // Guard: Telegram's Bot API download cap
+  if (fileSize > PDF_MAX_FILE_BYTES) {
+    await bot.sendMessage(
+      chatId,
+      `That PDF is ${(fileSize / 1024 / 1024).toFixed(1)} MB, which exceeds the 20 MB download limit. ` +
+        "Please send a smaller file.",
+    );
+    return;
+  }
+
+  await bot.sendChatAction(chatId, "typing");
+
+  // Download
+  let buffer: Buffer;
+  try {
+    buffer = await downloadTelegramFile(bot, doc.file_id);
+  } catch (dlErr: unknown) {
+    const m = dlErr instanceof Error ? dlErr.message : String(dlErr);
+    console.error(`[PDF] Download failed for chat ${chatId}: ${m}`);
+    await bot.sendMessage(
+      chatId,
+      "I couldn't download that file. Please try again.",
+    );
+    return;
+  }
+
+  // Extract text
+  let extracted: PdfExtractResult;
+  try {
+    extracted = await runPdfExtract(buffer);
+  } catch (parseErr: unknown) {
+    const m = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    console.error(`[PDF] Parsing failed for chat ${chatId}: ${m}`);
+    await bot.sendMessage(
+      chatId,
+      "I couldn't read that PDF — it may be scanned, password-protected, or corrupt. " +
+        "For scanned PDFs, try sending the image directly so I can OCR it.",
+    );
+    return;
+  }
+
+  if (!extracted.text) {
+    await bot.sendMessage(
+      chatId,
+      "The PDF appears to contain no extractable text. " +
+        "If it's a scanned document, send the pages as images instead.",
+    );
+    return;
+  }
+
+  const groq = getGroqClient();
+  const truncationNote = extracted.truncated
+    ? `\n\n(Note: the document is very long. Only the first ${PDF_MAX_TEXT_CHARS.toLocaleString()} characters were analysed.)`
+    : "";
+
+  if (caption.length > 0) {
+    // Q&A mode — user asked something specific about the document
+    console.log(
+      `[PDF] Caption present — routing to Groq Q&A for chat ${chatId}`,
+    );
+
+    const userContent =
+      `PDF document: "${fileName}" (${extracted.pages} page(s))\n\n` +
+      `=== DOCUMENT TEXT ===\n${extracted.text}\n=== END ===\n\n` +
+      `User question: ${caption}`;
+
+    const completion = await groq.chat.completions.create({
+      model: GROQ_MODEL,
+      messages: [
+        { role: "system", content: PDF_ANSWER_SYSTEM_PROMPT },
+        { role: "user", content: userContent },
+      ],
+      max_tokens: 1024,
+      temperature: 0.5,
+    });
+
+    const groqReply =
+      completion.choices[0]?.message?.content?.trim() ||
+      "I couldn't generate an answer. Please try again.";
+
+    console.log(
+      `[PDF+Groq] Q&A reply for chat ${chatId}: "${groqReply.slice(0, 120)}${groqReply.length > 120 ? "…" : ""}"`,
+    );
+
+    appendHistory(chatId, "user", `[PDF "${fileName}"] ${caption}`);
+    appendHistory(chatId, "assistant", groqReply);
+
+    await sendLongMessage(bot, chatId, groqReply + truncationNote);
+  } else {
+    // No caption — auto-summarise
+    console.log(
+      `[PDF] No caption — requesting Groq auto-summary for chat ${chatId}`,
+    );
+
+    const userContent =
+      `PDF document: "${fileName}" (${extracted.pages} page(s))\n\n` +
+      `=== DOCUMENT TEXT ===\n${extracted.text}\n=== END ===\n\n` +
+      `Please give a clear, concise summary of this document. ` +
+      `Cover the main topics, key points, and any important conclusions or data.`;
+
+    const completion = await groq.chat.completions.create({
+      model: GROQ_MODEL,
+      messages: [
+        { role: "system", content: PDF_ANSWER_SYSTEM_PROMPT },
+        { role: "user", content: userContent },
+      ],
+      max_tokens: 1024,
+      temperature: 0.5,
+    });
+
+    const groqReply =
+      completion.choices[0]?.message?.content?.trim() ||
+      "I couldn't generate a summary. Please try again.";
+
+    console.log(
+      `[PDF+Groq] Summary reply for chat ${chatId}: "${groqReply.slice(0, 120)}${groqReply.length > 120 ? "…" : ""}"`,
+    );
+
+    appendHistory(chatId, "user", `[PDF "${fileName}"] summarise`);
+    appendHistory(chatId, "assistant", groqReply);
+
+    const header = `📄 Summary of "${fileName}" (${extracted.pages} page(s)):\n\n`;
+    await sendLongMessage(bot, chatId, header + groqReply + truncationNote);
+  }
+
+  console.log(`[PDF] Response sent to chat ${chatId} ✅`);
+}
+
+// ---------------------------------------------------------------------------
 // Bot bootstrap
 // ---------------------------------------------------------------------------
 
@@ -599,10 +836,42 @@ export function startBot(): void {
   console.log(`[Bot] TAVILY_API_KEY defined: ${Boolean(tavilyKey)}`);
   console.log(`[Bot] OCR_SPACE_API_KEY defined: ${Boolean(ocrKey)}`);
   console.log("[Bot] Image generation: enabled (Pollinations.ai, no key needed)");
+  console.log("[Bot] PDF reading: enabled (pdf-parse, no key needed)");
   console.log(`[Bot] Model: ${GROQ_MODEL}`);
 
   const bot = new TelegramBot(token, { polling: true });
   console.log("[Bot] Telegram bot started with long polling ✅");
+
+  // ------------------------------------------------------------------
+  // PDF document messages → extract + summarise / Q&A
+  // ------------------------------------------------------------------
+  bot.on("document", async (msg) => {
+    const chatId = msg.chat.id;
+    const senderName =
+      msg.from?.username ??
+      (`${msg.from?.first_name ?? ""} ${msg.from?.last_name ?? ""}`.trim() ||
+        String(chatId));
+
+    console.log(
+      `[Telegram] Document received from @${senderName} (chat ${chatId}): "${msg.document?.file_name ?? "unknown"}"`,
+    );
+
+    try {
+      await handleDocumentMessage(chatId, bot, msg);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[Bot] PDF flow error for chat ${chatId}: ${message}`);
+      console.error("[Bot] Full error:", err);
+      try {
+        await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+      } catch (sendErr) {
+        console.error(
+          `[Bot] Failed to send fallback to chat ${chatId}:`,
+          sendErr,
+        );
+      }
+    }
+  });
 
   // ------------------------------------------------------------------
   // Photo messages → OCR flow
