@@ -1,6 +1,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import OpenAI from "openai";
 import { Client } from "magic-hour";
+import axios from "axios";
 import { tavily, type TavilyClient } from "@tavily/core";
 import { PDFParse } from "pdf-parse";
 import { search as duckDuckGoSearch } from "duck-duck-scrape";
@@ -451,7 +452,14 @@ async function handleImageGen(
   );
 
   await bot.sendChatAction(chatId, "upload_photo");
-  await bot.sendPhoto(chatId, imageUrl, {
+
+  // Download the image as a buffer to avoid Telegram's URL-fetch timeout (400 Bad Request)
+  const response = await axios.get<ArrayBuffer>(imageUrl, {
+    responseType: "arraybuffer",
+  });
+  const imageBuffer = Buffer.from(response.data);
+
+  await bot.sendPhoto(chatId, imageBuffer, {
     caption: `Here is your image: "${prompt}"`,
   });
 
