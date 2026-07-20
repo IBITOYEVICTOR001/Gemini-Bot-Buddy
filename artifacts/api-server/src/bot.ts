@@ -1,189 +1,30 @@
 import TelegramBot from "node-telegram-bot-api";
-import OpenAI from "openai";
-import { Client } from "magic-hour";
+import type { Message } from "node-telegram-bot-api";
 import axios from "axios";
-import { tavily, type TavilyClient } from "@tavily/core";
 import { PDFParse } from "pdf-parse";
-import { search as duckDuckGoSearch } from "duck-duck-scrape";
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+import { logger } from "./lib/logger";
+import {
+  analyzeDataset,
+  decideSearch,
+  generateConversationReply,
+  generateCreativeOutput,
+  generateGame,
+  generateCodeSnippet,
+  generateTranslation,
+  type ChatMessage,
+} from "./services/gemini";
+import { runTavilySearch } from "./services/tavily";
+import { createVideoJob, pollVideoCompletion } from "./services/json2video";
+import { synthesizeSpeech, transcribeAudio } from "./services/hf";
 
 const MAX_HISTORY = 10;
-const GROQ_MODEL = "llama-3.3-70b-versatile";
-const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
-
-const OCR_SPACE_API_URL = "https://api.ocr.space/parse/image";
-const POLLINATIONS_BASE_URL = "https://gen.pollinations.ai/image/";
-
-// PDF limits
-/** Telegram Bot API hard cap for file downloads */
-const PDF_MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
-/** Characters fed into Groq — keeps prompt within context window */
-const PDF_MAX_TEXT_CHARS = 15_000;
-
 const FALLBACK_MESSAGE =
   "Sorry, I ran into a problem reaching my AI brain. Please try again in a moment! 🙏";
 
-/**
- * System prompt for the search-decision step.
- * Must return valid JSON matching SearchDecision.
- */
-const SEARCH_DECISION_SYSTEM_PROMPT = `You are a routing assistant. Your only job is to decide whether answering the user's message requires live, up-to-date information from the internet.
-
-Rules:
-- If the question is about current events, news, real-time data, prices, sports scores, weather, or anything that changes frequently → needs_search: true
-- If the question can be answered accurately from general knowledge or the conversation so far → needs_search: false
-- Always provide a concise search_query (≤ 12 words) even when needs_search is false — it will be ignored in that case.
-
-Respond with ONLY a JSON object, no markdown, no explanation:
-{"needs_search": boolean, "search_query": string}`;
-
-/**
- * System prompt for the final answer step — defines LadexAIBot's personality and behaviour.
- */
-const ANSWER_SYSTEM_PROMPT = `You are LadexAIBot, a helpful, friendly, and knowledgeable AI assistant on Telegram. Follow these principles:
-
-1. Be concise by default. Give clear, direct answers. Only go longer when the question genuinely needs depth (e.g. explanations, tutorials, comparisons).
-2. Use natural, conversational language — avoid sounding robotic or overly formal unless the user's tone suggests they want that.
-3. When uncertain about a fact, say so clearly rather than guessing confidently. If web search results are available, prioritize those over your own assumptions for anything time-sensitive or fact[...]
-4. Format responses for readability on a phone screen: short paragraphs, occasional bullet points for lists, avoid giant walls of text.
-5. Match the user's energy — if they're casual, be casual; if they're asking something technical or serious, be precise and thorough.
-6. If a request is ambiguous, make a reasonable assumption and answer helpfully rather than asking clarifying questions for every little thing — but ask if the ambiguity is significant enough th[...]
-7. Don't over-apologize or add unnecessary disclaimers. Be direct and confident where you have good information.
-8. You can generate images (say so if asked "can you make images") and read text from photos sent to you (OCR) — mention these capabilities naturally if relevant, don't force it.`;
-
-/**
- * System prompt used when Groq is asked to reason about OCR-extracted text.
- */
-const OCR_ANSWER_SYSTEM_PROMPT = `You are a helpful Telegram chatbot assistant. The user has sent you an image. 
-The text extracted from that image via OCR is provided below, followed by the user's question or instruction about it.
-Answer clearly and concisely based on the extracted text.`;
-
-/**
- * System prompt used when Groq is asked to reason about PDF text.
- */
-const PDF_ANSWER_SYSTEM_PROMPT = `You are LadexAIBot. The user has sent you a PDF document.
-The text extracted from the document is provided below.
-When answering questions, be accurate and reference relevant parts of the document.
-When summarising, be concise — cover the main points in a way that fits a phone screen.
-Format for readability: short paragraphs, bullet points for lists.`;
-
-// ---------------------------------------------------------------------------
-// Image generation intent detection
-// ---------------------------------------------------------------------------
-
-const IMAGE_GEN_VERB_RE =
-  /\b(generate|draw|create|make|design|render|paint|sketch|produce|show me)\b/i;
-
-const IMAGE_GEN_NOUN_RE =
-  /\b(image|picture|photo|illustration|art(?:work)?|painting|portrait|poster|logo|icon|banner|wallpaper|cartoon|drawing|meme|thumbnail|visual|graphic|scene|landscape)\b/i;
-
-/**
- * Returns the cleaned image prompt if the text is an image-generation request,
- * or null if it is a regular chat message.
- */
-function extractImageGenPrompt(text: string): string | null {
-  if (!IMAGE_GEN_VERB_RE.test(text)) return null;
-  const hasDraw = /\bdraw\b/i.test(text);
-  if (!hasDraw && !IMAGE_GEN_NOUN_RE.test(text)) return null;
-
-  const stripped = text
-    .replace(
-      /^(generate|draw|create|make|design|render|paint|sketch|produce)\s+(me\s+)?/i,
-      "",
-    )
-    .replace(
-      /^(an?\s+)?(image|picture|photo|illustration|art(?:work)?|painting|portrait|poster|logo|icon|banner|wallpaper|cartoon|drawing|meme|thumbnail|visual|graphic|scene|landscape)\s+(of\s+)?/i,
-      "",
-    )
-    .replace(/\b(for me|please)\b/i, "")
-    .trim();
-
-  // FIX: If the prompt is empty because the user just said "generate an image", fallback to a default prompt
-  return stripped.length > 0 ? stripped : "a beautiful random fantasy landscape painting";
-}
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type Role = "user" | "assistant";
-
 interface ConversationTurn {
-  role: Role;
+  role: "user" | "assistant";
   content: string;
 }
-
-interface SearchDecision {
-  needs_search: boolean;
-  search_query: string;
-}
-
-interface SearchResult {
-  title: string;
-  url: string;
-  content: string;
-}
-
-interface PdfExtractResult {
-  text: string;
-  pages: number;
-  truncated: boolean;
-}
-
-interface OcrSpaceParsedResult {
-  ParsedText: string;
-  ErrorMessage: string;
-  ErrorDetails: string;
-}
-
-interface OcrSpaceResponse {
-  ParsedResults: OcrSpaceParsedResult[];
-  OCRExitCode: number;
-  IsErroredOnProcessing: boolean;
-  ErrorMessage: string | string[] | null;
-}
-
-// ---------------------------------------------------------------------------
-// Clients
-// ---------------------------------------------------------------------------
-
-let groqClient: OpenAI | null = null;
-let tavilyClient: TavilyClient | null = null;
-let magicHourClient: Client | null = null;
-
-function getGroqClient(): OpenAI {
-  if (!groqClient) {
-    const apiKey = process.env["GROQ_API_KEY"];
-    if (!apiKey) throw new Error("GROQ_API_KEY is not set");
-    groqClient = new OpenAI({ apiKey, baseURL: GROQ_BASE_URL });
-  }
-  return groqClient;
-}
-
-function getTavilyClient(): TavilyClient {
-  if (!tavilyClient) {
-    const apiKey = process.env["TAVILY_API_KEY"];
-    if (!apiKey) throw new Error("TAVILY_API_KEY is not set");
-    tavilyClient = tavily({ apiKey });
-  }
-  return tavilyClient;
-}
-
-function getMagicHourClient(): Client {
-  if (!magicHourClient) {
-    const apiKey = process.env["MAGIC_HOUR_API_KEY"];
-    if (!apiKey) throw new Error("MAGIC_HOUR_API_KEY is not set");
-    magicHourClient = new Client({ apiKey });
-  }
-  return magicHourClient;
-}
-
-// ---------------------------------------------------------------------------
-// History
-// ---------------------------------------------------------------------------
 
 const conversationHistory = new Map<number, ConversationTurn[]>();
 
@@ -194,7 +35,7 @@ function getHistory(chatId: number): ConversationTurn[] {
   return conversationHistory.get(chatId)!;
 }
 
-function appendHistory(chatId: number, role: Role, content: string): void {
+function appendHistory(chatId: number, role: ConversationTurn["role"], content: string): void {
   const history = getHistory(chatId);
   history.push({ role, content });
   if (history.length > MAX_HISTORY) {
@@ -202,345 +43,94 @@ function appendHistory(chatId: number, role: Role, content: string): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Logic Processes
-// ---------------------------------------------------------------------------
+function extractImageGenPrompt(text: string): string | null {
+  const verbRe = /\b(generate|draw|create|make|design|render|paint|sketch|produce|show me)\b/i;
+  const nounRe = /\b(image|picture|photo|illustration|art(?:work)?|painting|portrait|poster|logo|icon|banner|wallpaper|cartoon|drawing|meme|thumbnail|visual|graphic|scene|landscape)\b/i;
+  if (!verbRe.test(text) || !nounRe.test(text)) return null;
 
-async function decideSearch(
-  chatId: number,
-  userText: string,
-): Promise<SearchDecision> {
-  const groq = getGroqClient();
+  const stripped = text
+    .replace(/^(generate|draw|create|make|design|render|paint|sketch|produce)(\s+me)?\s+/i, "")
+    .replace(/^(an?\s+)?(image|picture|photo|illustration|art(?:work)?|painting|portrait|poster|logo|icon|banner|wallpaper|cartoon|drawing|meme|thumbnail|visual|graphic|scene|landscape)\s+(of\s+)?/i, "")
+    .replace(/\b(for me|please)\b/i, "")
+    .trim();
 
-  const historyContext = getHistory(chatId)
-    .slice(-4)
-    .map((t) => `${t.role === "user" ? "User" : "Bot"}: ${t.content}`)
-    .join("\n");
-
-  const contextNote =
-    historyContext.length > 0
-      ? `\n\nRecent conversation:\n${historyContext}`
-      : "";
-
-  const response = await groq.chat.completions.create({
-    model: GROQ_MODEL,
-    messages: [
-      { role: "system", content: SEARCH_DECISION_SYSTEM_PROMPT },
-      { role: "user", content: `${userText}${contextNote}` },
-    ],
-    response_format: { type: "json_object" },
-    max_tokens: 80,
-    temperature: 0,
-  });
-
-  const raw = response.choices[0]?.message?.content ?? "{}";
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    console.warn(
-      `[Router] Failed to parse search decision JSON for chat ${chatId}: ${raw}`,
-    );
-    return { needs_search: false, search_query: userText };
-  }
-
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    typeof (parsed as Record<string, unknown>)["needs_search"] !== "boolean" ||
-    typeof (parsed as Record<string, unknown>)["search_query"] !== "string"
-  ) {
-    console.warn(
-      `[Router] Unexpected search decision shape for chat ${chatId}:`,
-      parsed,
-    );
-    return { needs_search: false, search_query: userText };
-  }
-
-  const decision = parsed as SearchDecision;
-  console.log(
-    `[Router] Chat ${chatId} — needs_search: ${decision.needs_search}, query: "${decision.search_query}"`,
-  );
-  return decision;
+  return stripped.length > 0 ? stripped : "a beautiful fantasy landscape";
 }
 
-async function runTavilySearch(query: string): Promise<SearchResult[]> {
-  try {
-    const client = getTavilyClient();
-    const response = await client.search(query, {
-      searchDepth: "basic",
-      maxResults: 5,
-      includeAnswer: false,
-    });
-
-    const results: SearchResult[] = (response.results ?? []).map((r) => ({
-      title: r.title ?? "",
-      url: r.url ?? "",
-      content: r.content ?? "",
-    }));
-
-    console.log(`[Tavily] "${query}" → ${results.length} result(s)`);
-    return results;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[Tavily] Search failed for query "${query}": ${msg}`);
-    return [];
-  }
-}
-
-async function runDuckDuckGoSearch(query: string): Promise<SearchResult[]> {
-  try {
-    const response = await duckDuckGoSearch(query, { safeSearch: "off" });
-    const results: SearchResult[] = (response.results ?? [])
-      .slice(0, 5)
-      .map((r) => ({
-        title: r.title ?? "",
-        url: r.url ?? "",
-        content: r.description ?? "",
-      }));
-
-    console.log(`[DuckDuckGo] "${query}" → ${results.length} result(s)`);
-    return results;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[DuckDuckGo] Search failed for query "${query}": ${msg}`);
-    return [];
-  }
-}
-
-async function runWebSearch(query: string): Promise<SearchResult[]> {
-  const [tavilyResults, duckDuckGoResults] = await Promise.all([
-    runTavilySearch(query),
-    runDuckDuckGoSearch(query),
-  ]);
-
-  const merged = [...tavilyResults, ...duckDuckGoResults];
-  const seen = new Set<string>();
-  const deduplicated: SearchResult[] = [];
-
-  for (const result of merged) {
-    if (result.url && !seen.has(result.url)) {
-      seen.add(result.url);
-      deduplicated.push(result);
-    }
-  }
-
-  console.log(
-    `[WebSearch] Combined results: ${tavilyResults.length} from Tavily + ${duckDuckGoResults.length} from DuckDuckGo = ${deduplicated.length} deduplicated`,
-  );
-
-  return deduplicated;
-}
-
-async function getFinalAnswer(
-  chatId: number,
-  userText: string,
-  searchResults: SearchResult[],
-): Promise<{ reply: string; sources: string[] }> {
-  const groq = getGroqClient();
-  const history = getHistory(chatId);
-
-  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: ANSWER_SYSTEM_PROMPT },
-  ];
-
-  for (const turn of history) {
-    messages.push({ role: turn.role, content: turn.content });
-  }
-
-  let effectiveUserContent = userText;
-  const sources: string[] = [];
-
-  if (searchResults.length > 0) {
-    const searchContext = searchResults
-      .map(
-        (r, i) =>
-          `[Source ${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content.slice(0, 600)}`,
-      )
-      .join("\n\n---\n\n");
-
-    effectiveUserContent =
-      `The following live web search results were retrieved for this question. ` +
-      `These results are aggregated from multiple search engines (Tavily and DuckDuckGo). ` +
-      `Use this cross-checked information to provide an accurate, up-to-date answer. ` +
-      `State what they say directly and confidently. ` +
-      `Do NOT hedge or express doubt when the results clearly address the question. ` +
-      `Only use uncertain language if the results are genuinely vague, contradictory, or don't cover the question.\n\n` +
-      `=== LIVE SEARCH RESULTS (Multi-Engine Aggregated) ===\n${searchContext}\n=== END OF RESULTS ===\n\n` +
-      `User question: ${userText}`;
-
-    sources.push(...searchResults.map((r) => r.url).filter(Boolean));
-  }
-
-  messages.push({ role: "user", content: effectiveUserContent });
-
-  const completion = await groq.chat.completions.create({
-    model: GROQ_MODEL,
-    messages,
-    max_tokens: 1024,
-    temperature: 0.5,
-  });
-
-  const reply =
-    completion.choices[0]?.message?.content?.trim() ||
-    "I got an empty response — please try again.";
-
-  console.log(
-    `[Groq] Reply for chat ${chatId}: "${reply.slice(0, 120)}${reply.length > 120 ? "…" : ""}"`,
-  );
-
-  return { reply, sources };
-}
-
-async function handleUserMessage(
-  chatId: number,
-  userText: string,
-): Promise<string> {
+async function handleUserMessage(chatId: number, userText: string): Promise<string> {
   appendHistory(chatId, "user", userText);
 
-  const decision = await decideSearch(chatId, userText);
-
-  let searchResults: SearchResult[] = [];
-  if (decision.needs_search) {
-    try {
-      searchResults = await runWebSearch(decision.search_query);
-    } catch (searchErr: unknown) {
-      const msg =
-        searchErr instanceof Error ? searchErr.message : String(searchErr);
-      console.error(`[WebSearch] Search failed for chat ${chatId}: ${msg}`);
-    }
-  }
-
-  const { reply, sources } = await getFinalAnswer(
-    chatId,
-    userText,
-    searchResults,
-  );
-
-  let finalReply = reply;
-  if (sources.length > 0) {
-    const sourceLines = sources
-      .slice(0, 5)
-      .map((url, i) => `${i + 1}. ${url}`)
-      .join("\n");
-    finalReply = `${reply}\n\n🔗 Sources:\n${sourceLines}`;
-  }
-
-  appendHistory(chatId, "assistant", reply);
-
-  return finalReply;
-}
-
-// ---------------------------------------------------------------------------
-// Image generation via Pollinations.ai (FIXED: Path parameters + format validation)
-// ---------------------------------------------------------------------------
-
-async function handleImageGen(
-  chatId: number,
-  bot: TelegramBot,
-  prompt: string,
-): Promise<void> {
+  let searchResults = [] as { title: string; url: string; content: string }[];
   try {
-    console.log(`[ImageGen] Chat ${chatId} — prompt: "${prompt}"`);
-    await bot.sendChatAction(chatId, "upload_photo");
-
-    const response = await axios.get(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      responseType: "stream",
-      timeout: 15000,
-    });
-
-    await bot.sendPhoto(chatId, response.data, {}, {
-      filename: "image.jpg",
-      contentType: "image/jpeg",
-    });
-
-    console.log(`[ImageGen] Photo sent to chat ${chatId} ✅`);
-  } catch (error) {
-    console.error(error);
-    throw error;
+    const decision = await decideSearch(userText, getHistory(chatId).map((item) => ({ role: item.role, content: item.content })));
+    if (decision.needs_search) {
+      searchResults = await runTavilySearch(decision.search_query);
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn({ err: message }, "Search decision or Tavily lookup failed");
   }
-}
 
-// ---------------------------------------------------------------------------
-// Video generation via Magic Hour API (FIXED: Safe extraction fallback & Logging)
-// ---------------------------------------------------------------------------
+  const reply = await generateConversationReply(userText, getHistory(chatId).map((item) => ({ role: item.role, content: item.content })), searchResults);
+  appendHistory(chatId, "assistant", reply);
+  return reply;
+}
 
 async function handleVideoGen(
   chatId: number,
   bot: TelegramBot,
   prompt: string,
+  orientation: "horizontal" | "vertical" = "horizontal",
+  durationSeconds = 20,
 ): Promise<void> {
-  console.log(
-    `[VideoGen] Chat ${chatId} — prompt: "${prompt}" | triggering Magic Hour execution...`,
+  await bot.sendChatAction(chatId, "typing");
+
+  const job = await createVideoJob(prompt, orientation, durationSeconds);
+  await bot.sendMessage(
+    chatId,
+    `Your video job has been created (job ID: ${job.jobId}). I am checking status until it finishes processing. This may take up to a couple of minutes.`,
   );
 
-  await bot.sendChatAction(chatId, "upload_video");
+  const completion = await pollVideoCompletion(job.jobId, {
+    intervalMs: 5000,
+    maxAttempts: 20,
+  });
 
-  try {
-    const magicHour = getMagicHourClient();
-
-    const response = await magicHour.v1.textToVideo.generate({
-      prompt: prompt,
-      endSeconds: 5,
-      style: {
-        id: "realistic",
-        name: "Realistic"
-      },
-      waitForCompletion: true
-    });
-
-    console.log(`[VideoGen] Raw response payload collected:`, JSON.stringify(response));
-
-    const data = response as any;
-    // Multi-tier extraction logic protecting against alternative SDK responses
-    const videoUrl = data.videoUrl || data.downloadUrl || data.download_url || (data.result && (data.result.videoUrl || data.result.download_url));
-    
-    if (!videoUrl || typeof videoUrl !== "string") {
-      throw new Error(`Asset key matching failed. Full payload text: ${JSON.stringify(data)}`);
-    }
-
-    console.log(`[VideoGen] Pulling remote generation into temporary server memory buffer...`);
-    
-    const videoRes = await fetch(videoUrl);
-    if (!videoRes.ok) throw new Error(`Asset host down or blocked access to target link: ${videoUrl}`);
-    const videoBuffer = Buffer.from(await videoRes.arrayBuffer());
-
-    console.log(`[VideoGen] Transmitting payload binary file stream directly into Telegram API chat context...`);
-
-    await bot.sendVideo(chatId, videoBuffer, {
-      caption: `Here is your video: "${prompt}"`,
-    }, {
-      filename: "video.mp4",
-      contentType: "video/mp4"
-    });
-
-    console.log(`[VideoGen] Finished processing video upload for chat ${chatId} ✅`);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[VideoGen Critical Failure] Chat ${chatId}: ${msg}`);
-    await bot.sendMessage(
-      chatId,
-      "Sorry, I couldn't generate the video. Please try again later.",
-    );
-  }
+  await bot.sendMessage(
+    chatId,
+    `Your video is ready! Download it here:\n${completion.downloadUrl}`,
+  );
 }
 
-// ---------------------------------------------------------------------------
-// OCR Processing
-// ---------------------------------------------------------------------------
+async function handleVoiceMessage(chatId: number, bot: TelegramBot, msg: Message): Promise<void> {
+  const voice = msg.voice;
+  if (!voice) return;
 
-async function downloadTelegramFile(
-  bot: TelegramBot,
-  fileId: string,
-): Promise<Buffer> {
+  await bot.sendChatAction(chatId, "typing");
+
+  const url = await bot.getFileLink(voice.file_id);
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download voice message: ${response.status}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const transcript = await transcribeAudio(buffer);
+  await bot.sendMessage(chatId, `📝 Transcription:\n${transcript}`);
+}
+
+async function handleTextToSpeech(chatId: number, bot: TelegramBot, text: string): Promise<void> {
+  const audioBuffer = await synthesizeSpeech(text);
+  await bot.sendAudio(chatId, audioBuffer, {
+    caption: "Here is the synthesized audio.",
+  });
+}
+
+async function downloadTelegramFile(bot: TelegramBot, fileId: string): Promise<Buffer> {
   const fileLink = await bot.getFileLink(fileId);
   const res = await fetch(fileLink);
   if (!res.ok) {
-    throw new Error(
-      `Failed to download Telegram file: ${res.status} ${res.statusText}`,
-    );
+    throw new Error(`Failed to download Telegram file: ${res.status} ${res.statusText}`);
   }
   return Buffer.from(await res.arrayBuffer());
 }
@@ -555,15 +145,9 @@ async function runOcr(imageBuffer: Buffer): Promise<string> {
   formData.append("isOverlayRequired", "false");
   formData.append("detectOrientation", "true");
   formData.append("scale", "true");
-  formData.append(
-    "file",
-    new Blob([imageBuffer], { type: "image/jpeg" }),
-    "image.jpg",
-  );
+  formData.append("file", imageBuffer, "image.jpg");
 
-  console.log(`[OCR] Sending image to OCR.space (${imageBuffer.length} bytes)`);
-
-  const res = await fetch(OCR_SPACE_API_URL, {
+  const res = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
     body: formData,
   });
@@ -572,353 +156,210 @@ async function runOcr(imageBuffer: Buffer): Promise<string> {
     throw new Error(`OCR.space HTTP error: ${res.status} ${res.statusText}`);
   }
 
-  const data = (await res.json()) as OcrSpaceResponse;
+  const data = (await res.json()) as {
+    ParsedResults?: Array<{ ParsedText?: string }>;
+    IsErroredOnProcessing?: boolean;
+    ErrorMessage?: string | string[];
+  };
 
   if (data.IsErroredOnProcessing) {
-    const msg = Array.isArray(data.ErrorMessage)
-      ? data.ErrorMessage.join("; ")
-      : (data.ErrorMessage ?? "Unknown OCR error");
-    throw new Error(`OCR.space processing error: ${msg}`);
+    const message = Array.isArray(data.ErrorMessage) ? data.ErrorMessage.join("; ") : data.ErrorMessage ?? "Unknown error";
+    throw new Error(`OCR.space error: ${message}`);
   }
 
-  const extractedText = (data.ParsedResults ?? [])
-    .map((r) => r.ParsedText ?? "")
-    .join("\n")
-    .trim();
-
-  console.log(
-    `[OCR] Extracted text (${extractedText.length} chars): "${extractedText.slice(0, 120)}${extractedText.length > 120 ? "…" : ""}"`,
-  );
-
-  return extractedText;
+  return (data.ParsedResults ?? []).map((result) => result.ParsedText ?? "").join("\n").trim();
 }
 
-async function handlePhotoMessage(
-  chatId: number,
-  bot: TelegramBot,
-  msg: TelegramBot.Message,
-): Promise<void> {
+async function handlePhotoMessage(chatId: number, bot: TelegramBot, msg: Message): Promise<void> {
   const photos = msg.photo;
-  if (!photos || photos.length === 0) return;
-
+  if (!photos?.length) return;
   const fileId = photos[photos.length - 1]!.file_id;
   const caption = msg.caption?.trim() ?? "";
 
-  console.log(
-    `[OCR] Photo received in chat ${chatId}${caption ? ` with caption: "${caption}"` : " (no caption)"}`,
-  );
-
   await bot.sendChatAction(chatId, "typing");
 
-  let extractedText: string;
-  try {
-    const imageBuffer = await downloadTelegramFile(bot, fileId);
-    extractedText = await runOcr(imageBuffer);
-  } catch (ocrErr: unknown) {
-    const msg2 = ocrErr instanceof Error ? ocrErr.message : String(ocrErr);
-    console.error(`[OCR] Failed for chat ${chatId}: ${msg2}`);
-    await bot.sendMessage(
-      chatId,
-      "Sorry, I could not extract text from that image. Please make sure the image contains clear, readable text and try again.",
-    );
-    return;
-  }
-
+  const buffer = await downloadTelegramFile(bot, fileId);
+  const extractedText = await runOcr(buffer);
   if (!extractedText) {
-    await bot.sendMessage(
-      chatId,
-      "I could not find any readable text in that image.",
-    );
+    await bot.sendMessage(chatId, "I could not extract readable text from the image.");
     return;
   }
 
-  if (caption.length > 0) {
-    const groq = getGroqClient();
-    const userContent = `OCR extracted text:\n"""\n${extractedText}\n"""\n\nUser instruction: ${caption}`;
-
-    console.log(
-      `[OCR] Caption detected — passing extracted text + caption to Groq for chat ${chatId}`,
-    );
-
-    const completion = await groq.chat.completions.create({
-      model: GROQ_MODEL,
-      messages: [
-        { role: "system", content: OCR_ANSWER_SYSTEM_PROMPT },
-        { role: "user", content: userContent },
-      ],
-      max_tokens: 1024,
-      temperature: 0.5,
-    });
-
-    const groqReply =
-      completion.choices[0]?.message?.content?.trim() ||
-      "I could not generate a response about the image content.";
-
-    console.log(
-      `[OCR+Groq] Reply for chat ${chatId}: "${groqReply.slice(0, 120)}${groqReply.length > 120 ? "…" : ""}"`,
-    );
-
-    appendHistory(chatId, "user", `[Image OCR] ${caption}`);
-    appendHistory(chatId, "assistant", groqReply);
-
-    const safe =
-      groqReply.length > 4000
-        ? groqReply.slice(0, 4000) + "\n\n…(truncated)"
-        : groqReply;
-    await bot.sendMessage(chatId, safe);
+  if (caption) {
+    const translation = await generateTranslation(extractedText, "English");
+    await bot.sendMessage(chatId, `📄 Extracted text:\n${extractedText}\n\nTranslation to English:\n${translation}`);
   } else {
-    const header = "📄 Text extracted from your image:\n\n";
-    const body =
-      extractedText.length > 3900
-        ? extractedText.slice(0, 3900) + "\n\n…(truncated)"
-        : extractedText;
-    await bot.sendMessage(chatId, header + body);
+    await bot.sendMessage(chatId, `📄 Extracted text:\n${extractedText}`);
   }
-
-  console.log(`[OCR] Response sent to chat ${chatId} ✅`);
 }
 
-// ---------------------------------------------------------------------------
-// PDF Processing Logic
-// ---------------------------------------------------------------------------
-
-async function runPdfExtract(buffer: Buffer): Promise<PdfExtractResult> {
+async function runPdfExtract(buffer: Buffer): Promise<{ text: string; pages: number; truncated: boolean }> {
   const parser = new PDFParse({ data: buffer });
   try {
     const result = await parser.getText();
     const raw = result.text.trim();
-    const truncated = raw.length > PDF_MAX_TEXT_CHARS;
-    const text = truncated ? raw.slice(0, PDF_MAX_TEXT_CHARS) : raw;
-
-    console.log(
-      `[PDF] Extracted ${raw.length} chars across ${result.total} page(s)` +
-        (truncated ? ` — truncated to ${PDF_MAX_TEXT_CHARS} chars for Groq` : ""),
-    );
-
-    return { text, pages: result.total, truncated };
+    const truncated = raw.length > 15_000;
+    return { text: truncated ? raw.slice(0, 15_000) : raw, pages: result.total, truncated };
   } finally {
     await parser.destroy();
   }
 }
 
-async function sendLongMessage(
-  bot: TelegramBot,
-  chatId: number,
-  text: string,
-): Promise<void> {
-  const CHUNK = 4000;
-  if (text.length <= CHUNK) {
-    await bot.sendMessage(chatId, text);
-    return;
-  }
-  let offset = 0;
-  let part = 1;
-  const total = Math.ceil(text.length / CHUNK);
-  while (offset < text.length) {
-    const slice = text.slice(offset, offset + CHUNK);
-    await bot.sendMessage(chatId, `[Part ${part}/${total}]\n\n${slice}`);
-    offset += CHUNK;
-    part++;
+async function sendLongMessage(bot: TelegramBot, chatId: number, text: string): Promise<void> {
+  const maxChunk = 4000;
+  for (let offset = 0, part = 1; offset < text.length; offset += maxChunk, part += 1) {
+    await bot.sendMessage(chatId, `[Part ${part}]\n${text.slice(offset, offset + maxChunk)}`);
   }
 }
 
-async function handleDocumentMessage(
-  chatId: number,
-  bot: TelegramBot,
-  msg: TelegramBot.Message,
-): Promise<void> {
-  const doc = msg.document!;
-  const caption = msg.caption?.trim() ?? "";
+async function handleDocumentMessage(chatId: number, bot: TelegramBot, msg: Message): Promise<void> {
+  const doc = msg.document;
+  if (!doc) return;
+
   const fileName = doc.file_name ?? "document.pdf";
-  const fileSize = doc.file_size ?? 0;
+  const caption = msg.caption?.trim() ?? "";
 
-  console.log(
-    `[PDF] Document received in chat ${chatId} — file: "${fileName}", ` +
-      `size: ${(fileSize / 1024).toFixed(1)} KB` +
-      (caption ? `, caption: "${caption}"` : ", no caption"),
-  );
-
-  const isPdf =
-    doc.mime_type === "application/pdf" ||
-    fileName.toLowerCase().endsWith(".pdf");
-  if (!isPdf) {
-    await bot.sendMessage(
-      chatId,
-      "I can only read PDF files right now. Send me a .pdf document and I'll extract and analyse its text.",
-    );
+  if (!doc.mime_type?.includes("pdf") && !fileName.toLowerCase().endsWith(".pdf")) {
+    await bot.sendMessage(chatId, "I can only process PDF documents right now.");
     return;
   }
 
-  if (fileSize > PDF_MAX_FILE_BYTES) {
-    await bot.sendMessage(
-      chatId,
-      `That PDF is ${(fileSize / 1024 / 1024).toFixed(1)} MB, which exceeds the 20 MB download limit. ` +
-        "Please send a smaller file.",
-    );
-    return;
-  }
-
-  await bot.sendChatAction(chatId, "typing");
-
-  let buffer: Buffer;
-  try {
-    buffer = await downloadTelegramFile(bot, doc.file_id);
-  } catch (dlErr: unknown) {
-    const m = dlErr instanceof Error ? dlErr.message : String(dlErr);
-    console.error(`[PDF] Download failed for chat ${chatId}: ${m}`);
-    await bot.sendMessage(
-      chatId,
-      "I couldn't download that file. Please try again.",
-    );
-    return;
-  }
-
-  let extracted: PdfExtractResult;
-  try {
-    extracted = await runPdfExtract(buffer);
-  } catch (parseErr: unknown) {
-    const m = parseErr instanceof Error ? parseErr.message : String(parseErr);
-    console.error(`[PDF] Parsing failed for chat ${chatId}: ${m}`);
-    await bot.sendMessage(
-      chatId,
-      "I couldn't read that PDF — it may be scanned, password-protected, or corrupt. " +
-        "For scanned PDFs, try sending the image directly so I can OCR it.",
-    );
-    return;
-  }
-
+  const buffer = await downloadTelegramFile(bot, doc.file_id);
+  const extracted = await runPdfExtract(buffer);
   if (!extracted.text) {
-    await bot.sendMessage(
-      chatId,
-      "The PDF appears to contain no extractable text. " +
-        "If it's a scanned document, send the pages as images instead.",
-    );
+    await bot.sendMessage(chatId, "I could not extract readable text from that PDF.");
     return;
   }
 
-  const groq = getGroqClient();
-  const truncationNote = extracted.truncated
-    ? `\n\n(Note: the document is very long. Only the first ${PDF_MAX_TEXT_CHARS.toLocaleString()} characters were analysed.)`
-    : "";
-
-  if (caption.length > 0) {
-    console.log(
-      `[PDF] Caption present — routing to Groq Q&A for chat ${chatId}`,
-    );
-
-    const userContent =
-      `PDF document: "${fileName}" (${extracted.pages} page(s))\n\n` +
-      `=== DOCUMENT TEXT ===\n${extracted.text}\n=== END ===\n\n` +
-      `User question: ${caption}`;
-
-    const completion = await groq.chat.completions.create({
-      model: GROQ_MODEL,
-      messages: [
-        { role: "system", content: PDF_ANSWER_SYSTEM_PROMPT },
-        { role: "user", content: userContent },
-      ],
-      max_tokens: 1024,
-      temperature: 0.5,
-    });
-
-    const groqReply =
-      completion.choices[0]?.message?.content?.trim() ||
-      "I couldn't generate an answer. Please try again.";
-
-    console.log(
-      `[PDF+Groq] Q&A reply for chat ${chatId}: "${groqReply.slice(0, 120)}${groqReply.length > 120 ? "…" : ""}"`,
-    );
-
-    appendHistory(chatId, "user", `[PDF "${fileName}"] ${caption}`);
-    appendHistory(chatId, "assistant", groqReply);
-
-    await sendLongMessage(bot, chatId, groqReply + truncationNote);
+  if (caption) {
+    const analysis = await generateConversationReply(caption, [], []);
+    await sendLongMessage(bot, chatId, `📄 Extracted text from ${fileName}:\n${extracted.text}\n\nAI analysis:\n${analysis}`);
   } else {
-    console.log(
-      `[PDF] No caption — requesting Groq auto-summary for chat ${chatId}`,
-    );
-
-    const userContent =
-      `PDF document: "${fileName}" (${extracted.pages} page(s))\n\n` +
-      `=== DOCUMENT TEXT ===\n${extracted.text}\n=== END ===\n\n` +
-      `Please give a clear, concise summary of this document. ` +
-      `Cover the main topics, key points, and any important conclusions or data.`;
-
-    const completion = await groq.chat.completions.create({
-      model: GROQ_MODEL,
-      messages: [
-        { role: "system", content: PDF_ANSWER_SYSTEM_PROMPT },
-        { role: "user", content: userContent },
-      ],
-      max_tokens: 1024,
-      temperature: 0.5,
-    });
-
-    const groqReply =
-      completion.choices[0]?.message?.content?.trim() ||
-      "I couldn't generate a summary. Please try again.";
-
-    console.log(
-      `[PDF+Groq] Summary reply for chat ${chatId}: "${groqReply.slice(0, 120)}${groqReply.length > 120 ? "…" : ""}"`,
-    );
-
-    appendHistory(chatId, "user", `[PDF "${fileName}"] summarise`);
-    appendHistory(chatId, "assistant", groqReply);
-
-    const header = `📄 Summary of "${fileName}" (${extracted.pages} page(s)):\n\n`;
-    await sendLongMessage(bot, chatId, header + groqReply + truncationNote);
+    await sendLongMessage(bot, chatId, `📄 Summary request for ${fileName}:\n${extracted.text}`);
   }
-
-  console.log(`[PDF] Response sent to chat ${chatId} ✅`);
 }
-
-// ---------------------------------------------------------------------------
-// Bot Entry / Event Handlers
-// ---------------------------------------------------------------------------
 
 export async function startBot(): Promise<void> {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
+  const geminiKey = process.env["GEMINI_API_KEY"];
+
   if (!token) {
     console.error("[Bot] TELEGRAM_BOT_TOKEN missing — Execution cancelled.");
     return;
   }
 
-  if (!process.env["GROQ_API_KEY"]) {
-    console.error("[Bot] GROQ_API_KEY missing — Execution cancelled.");
+  if (!geminiKey) {
+    console.error("[Bot] GEMINI_API_KEY missing — Execution cancelled.");
     return;
   }
 
   const bot = new TelegramBot(token, { polling: false });
   await bot.deleteWebhook({ drop_pending_updates: true });
   bot.startPolling({ restart: true });
-  console.log("[Bot] Telegram application polling active ✅");
+  logger.info("[Bot] Telegram polling is active.");
 
-  // 1. Video Route Handling Block
-  bot.onText(/^\/video\s+(.+)$/, async (msg, match) => {
+  bot.onText(/^\/video\s+(horizontal|vertical)?\s*(\d+)?\s*(.*)$/i, async (msg, match) => {
+    if (!msg) return;
     const chatId = msg.chat.id;
-    const prompt = match![1]!.trim();
+    const orientation = (match?.[1] ? match[1].toLowerCase() : "horizontal") as "horizontal" | "vertical";
+    const durationSeconds = match?.[2] ? Number(match[2]) : 20;
+    const prompt = match?.[3]?.trim();
+    if (!prompt) {
+      await bot.sendMessage(chatId, "Usage: /video [horizontal|vertical] [duration] your prompt");
+      return;
+    }
 
     try {
-      await handleVideoGen(chatId, bot, prompt);
+      await handleVideoGen(chatId, bot, prompt, orientation, durationSeconds);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`[Bot Exception Handling /video] Context: ${message}`);
-      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+      logger.error({ err: message }, "Video generation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't generate that video right now.");
     }
   });
 
-  // 2. Document Parsing Route Handling Block
-  bot.on("document", async (msg) => {
+  bot.onText(/^\/say\s+(.+)$/i, async (msg, match) => {
+    if (!msg || !match?.[1]) return;
     const chatId = msg.chat.id;
     try {
-      await handleDocumentMessage(chatId, bot, msg);
+      await handleTextToSpeech(chatId, bot, match[1]);
     } catch (err: unknown) {
-      console.error(`[Bot Exception Handling Document] Flow stopped unexpectedly.`);
-      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Text-to-speech failed");
+      await bot.sendMessage(chatId, "Sorry, I could not generate audio right now.");
     }
   });
 
-  // 3. Photo Text Scanning Route Handling Block
+  bot.onText(/^\/translate\s+to\s+([A-Za-z]+)\s*:\s*(.+)$/i, async (msg, match) => {
+    if (!msg || !match) return;
+    const chatId = msg.chat.id;
+    const targetLanguage = match[1];
+    const text = match[2];
+    try {
+      const translation = await generateTranslation(text, targetLanguage);
+      await bot.sendMessage(chatId, `Translation (${targetLanguage}):\n${translation}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Translation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't translate that text.");
+    }
+  });
+
+  bot.onText(/^\/(story|poem|dialogue|project)\s+(.+)$/i, async (msg, match) => {
+    if (!msg || !match) return;
+    const chatId = msg.chat.id;
+    const command = match[1].toLowerCase();
+    const topic = match[2];
+    try {
+      const type = command === "project" ? "projectIdeas" : (command as "story" | "poem" | "dialogue");
+      const output = await generateCreativeOutput(type, topic);
+      await bot.sendMessage(chatId, output);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Creative output failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't generate that creative output.");
+    }
+  });
+
+  bot.onText(/^\/(hangman|20questions|wordjumble)\s+(.+)$/i, async (msg, match) => {
+    if (!msg || !match) return;
+    const chatId = msg.chat.id;
+    const gameType = match[1].toLowerCase() as "hangman" | "20questions" | "wordjumble";
+    const subject = match[2];
+    try {
+      const game = await generateGame(gameType, subject);
+      await bot.sendMessage(chatId, game);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Game generation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't start that game.");
+    }
+  });
+
+  bot.onText(/^\/code\s+(.+)$/i, async (msg, match) => {
+    if (!msg || !match?.[1]) return;
+    const chatId = msg.chat.id;
+    try {
+      const code = await generateCodeSnippet(match[1], "JavaScript");
+      await bot.sendMessage(chatId, code);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Code generation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't generate code for that request.");
+    }
+  });
+
+  bot.on("voice", async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      await handleVoiceMessage(chatId, bot, msg);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Voice transcription failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't transcribe that voice message.");
+    }
+  });
+
   bot.on("photo", async (msg) => {
     const chatId = msg.chat.id;
     if (!process.env["OCR_SPACE_API_KEY"]) {
@@ -929,40 +370,56 @@ export async function startBot(): Promise<void> {
     try {
       await handlePhotoMessage(chatId, bot, msg);
     } catch (err: unknown) {
-      console.error(`[Bot Exception Handling Photo OCR] Engine processing failure.`);
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Photo OCR failed");
       await bot.sendMessage(chatId, FALLBACK_MESSAGE);
     }
   });
 
-  // 4. Default Text Message Routing Engine (Core Dialogue + Image Branching)
-  bot.on("message", async (msg) => {
+  bot.on("document", async (msg) => {
     const chatId = msg.chat.id;
-    const userText = msg.text;
-
-    if (!userText || userText.startsWith("/video")) return;
-
     try {
-      const imagePrompt = extractImageGenPrompt(userText);
-
-      if (imagePrompt !== null) {
-        console.log(`[Routing Execution] Parsing target string directly to Image Generator Engine.`);
-        await handleImageGen(chatId, bot, imagePrompt);
-        return;
-      }
-
-      console.log(`[Routing Execution] Context routed smoothly to Groq chat sequence.`);
-      const reply = await handleUserMessage(chatId, userText);
-
-      const safe = reply.length > 4000 ? reply.slice(0, 4000) + "\n\n…(truncated)" : reply;
-      await bot.sendMessage(chatId, safe);
+      await handleDocumentMessage(chatId, bot, msg);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`[Core Routing Failure Instance] Logging details: ${message}`);
+      logger.error({ err: message }, "Document processing failed");
       await bot.sendMessage(chatId, FALLBACK_MESSAGE);
     }
   });
 
-  bot.on("polling_error", (err) => {
-    console.error("[Polling Warning Caught]", err.message);
+  bot.on("message", async (msg) => {
+    if (!msg.text) return;
+    const chatId = msg.chat.id;
+
+    if (msg.text.startsWith("/")) return;
+
+    const imagePrompt = extractImageGenPrompt(msg.text);
+    if (imagePrompt) {
+      try {
+        await bot.sendChatAction(chatId, "upload_photo");
+        const response = await axios.get(
+          `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}`,
+          { responseType: "stream", timeout: 15000 },
+        );
+        await bot.sendPhoto(chatId, response.data, { caption: "Here is your image." });
+        return;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn({ err: message }, "Image generation fallback failed");
+      }
+    }
+
+    try {
+      const reply = await handleUserMessage(chatId, msg.text);
+      await bot.sendMessage(chatId, reply);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Chat response failed");
+      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+    }
+  });
+
+  bot.on("polling_error", (error) => {
+    logger.error({ err: error.message }, "Polling error");
   });
 }
