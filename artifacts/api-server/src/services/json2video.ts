@@ -32,7 +32,7 @@ export async function createVideoJob(
     name: "Telegram Bot Video",
     end_seconds: clampedDuration,
     orientation: orientation === "vertical" ? "portrait" : "landscape",
-    resolution: "720p",
+    resolution: "480p",
     style: { prompt },
   };
 
