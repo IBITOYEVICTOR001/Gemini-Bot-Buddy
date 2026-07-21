@@ -11,7 +11,9 @@ export type SearchResult = {
   content: string;
 };
 
-const GEMINI_MODEL = process.env["GEMINI_MODEL"] ?? "gemini-1.5-flash";
+const GEMINI_MODEL = process.env["GEMINI_MODEL"]
+  ? process.env["GEMINI_MODEL"].replace(/^models\//, "")
+  : "gemini-1.5-flash";
 
 let geminiClient: OpenAI | null = null;
 
