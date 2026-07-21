@@ -29,11 +29,10 @@ export async function createVideoJob(
     quality: "high",
     scenes: [
       {
-       elements: [
-{ type: "image", src: imageUrl, resize: "cover" },
-  { type: "voice", text: prompt, model: "azure", voice: "en-US-JennyNeural" },
-  { type: "subtitles" },
-],
+        elements: [
+          { type: "image", src: imageUrl, resize: "cover" },
+          { type: "voice", text: prompt, model: "azure", voice: "en-US-JennyNeural" },
+          { type: "subtitles" },
         ],
       },
     ],
