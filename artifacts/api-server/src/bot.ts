@@ -12,14 +12,14 @@ import {
   generateCodeSnippet,
   generateTranslation,
   type ChatMessage,
-} from "./services/gemini";
+} from "./services/groq";
 import { runTavilySearch } from "./services/tavily";
 import { createVideoJob, pollVideoCompletion } from "./services/json2video";
 import { synthesizeSpeech, transcribeAudio } from "./services/hf";
 
 const MAX_HISTORY = 10;
 const FALLBACK_MESSAGE =
-  "Sorry, I ran into a problem reaching my AI brain. Please try again in a moment! 🙏";
+  "LADEX IS NOT AVAILABLE AT THE MOMENT PLS TRY AGAIN LATER";
 
 interface ConversationTurn {
   role: "user" | "assistant";
@@ -248,7 +248,7 @@ export function getBot(): TelegramBot {
 
 export async function startBot(): Promise<void> {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
-  const geminiKey = process.env["GEMINI_API_KEY"];
+  const groqKey = process.env["GROQ_API_KEY"];
   const webhookUrl = process.env["WEBHOOK_URL"];
 
   if (!token) {
@@ -256,8 +256,8 @@ export async function startBot(): Promise<void> {
     return;
   }
 
-  if (!geminiKey) {
-    console.error("[Bot] GEMINI_API_KEY missing — Execution cancelled.");
+  if (!groqKey) {
+    console.error("[Bot] GROQ_API_KEY missing — Execution cancelled.");
     return;
   }
 
@@ -430,7 +430,8 @@ export async function startBot(): Promise<void> {
       await bot.sendMessage(chatId, FALLBACK_MESSAGE);
     }
   });
-bot.on("webhook_error", (error) => {
+
+  bot.on("webhook_error", (error) => {
     logger.error({ err: error.message }, "Webhook error");
   });
 }
