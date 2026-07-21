@@ -1,7 +1,6 @@
 // hf-tts-transcribe.ts
 const HF_BASE_URL = "https://router.huggingface.co/hf-inference/models";
 const TRANSCRIBE_MODEL = "openai/whisper-large-v3";
-const TTS_MODEL = "facebook/mms-tts-eng";
 
 function getHfToken(): string {
   const token = process.env["HF_TOKEN"];
@@ -101,7 +100,6 @@ export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
     };
 
     if (!response.ok) {
-      // Try to read body as text for error details
       const body = await response.text();
       debugLog("transcribe error body:", body);
       throw new Error(`Hugging Face transcription failed (${response.status}): ${body}`);
@@ -111,7 +109,6 @@ export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
       return textFromJson();
     }
 
-    // If content-type is not JSON, still attempt to parse as JSON safely
     try {
       return await textFromJson();
     } catch (err) {
@@ -121,46 +118,19 @@ export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
 }
 
 /**
- * Synthesize speech using the specified TTS model and return an audio Buffer.
- * This function checks content-type and surfaces JSON error payloads.
+ * Synthesize speech using StreamElements' free TTS endpoint and return an audio Buffer.
+ * No API key required.
  */
 export async function synthesizeSpeech(text: string): Promise<Buffer> {
-  return retry(async () => {
-    const response = await fetch(`${HF_BASE_URL}/${TTS_MODEL}`, {
-      method: "POST",
-      headers: getHfHeaders("application/json"),
-      body: JSON.stringify({ text_inputs: text }),
-    });
+  const voice = "Brian"; // other options: Amy, Emma, Justin, Russell, Joey, etc.
+  const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text)}`;
 
-    const contentType = response.headers.get("content-type") || "";
-    debugLog("tts content-type:", contentType);
+  const response = await fetch(url);
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`StreamElements TTS failed (${response.status}): ${body}`);
+  }
 
-    if (!response.ok) {
-      const body = await response.text();
-      debugLog("tts error body:", body);
-      throw new Error(`Hugging Face TTS failed (${response.status}): ${body}`);
-    }
-
-    // If the endpoint returned JSON, it's likely an error or message
-    if (contentType.includes("application/json") || contentType.includes("text/json")) {
-      const json = await response.json();
-      debugLog("tts returned json:", json);
-      throw new Error(`Hugging Face TTS returned JSON instead of audio: ${JSON.stringify(json)}`);
-    }
-
-    // Accept common audio content types
-    if (
-      contentType.includes("audio/") ||
-      contentType.includes("application/octet-stream") ||
-      contentType === ""
-    ) {
-      const arrayBuffer = await response.arrayBuffer();
-      return Buffer.from(arrayBuffer);
-    }
-
-    // Fallback: try to read as arrayBuffer but warn
-    debugLog("tts unexpected content-type, attempting to read as arrayBuffer");
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  });
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
 }
