@@ -11,7 +11,7 @@ export type SearchResult = {
   content: string;
 };
 
-const GEMINI_MODEL = process.env["GEMINI_MODEL"] ?? "gemini-1.5-pro";
+const GEMINI_MODEL = process.env["GEMINI_MODEL"] ?? "gemini-1.5-flash";
 
 let geminiClient: OpenAI | null = null;
 
@@ -21,7 +21,7 @@ function getGeminiClient(): OpenAI {
     if (!apiKey) {
       throw new Error("GEMINI_API_KEY is not set");
     }
-    geminiClient = new OpenAI({ apiKey });
+    geminiClient = new OpenAI({ apiKey, baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/" });
   }
   return geminiClient;
 }
