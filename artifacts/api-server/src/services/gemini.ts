@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 
+// --- Types ---
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
@@ -16,214 +17,170 @@ export type SearchResult = {
   content: string;
 };
 
-const GEMINI_MODEL = (process.env["GEMINI_MODEL"] || "gemini-2.5-flash").replace(/^models\//, "");
+// --- Client & Model Setup ---
+const apiKey = process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || "";
+const baseURL = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 const openai = new OpenAI({
-  apiKey: process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY,
-  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+  apiKey,
+  baseURL,
 });
 
-const CORE_INTELLIGENCE_SYSTEM_PROMPT = `You are a versatile AI assistant for conversational chat, teaching, research framing, creativity, project ideation, games, translation, clean code generation, and data analytics.
-Use simple, easy-to-understand explanations when defining concepts or breaking down complex topics.
-When writing stories, poems, dialogues, or project ideas, be original and imaginative.
-When asked to translate, detect the user's input language and return an accurate result in the requested target language.
-When asked to generate code or scripts, produce clean, runnable solutions and include minimal explanatory context only when the user requests it.
-When asked to analyse numbers, statistics, or datasets, identify key patterns and explain what the numbers mean for a real user.
-When asked for a text-based game, produce a playable round of Hangman, 20 Questions, or Word Jumble, including clear rules and a starting state.`;
+const rawModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+export const GEMINI_MODEL = rawModel.replace(/^models\//, "");
 
-async function geminiChat(
+// --- Core System Prompts ---
+const CORE_INTELLIGENCE_SYSTEM_PROMPT = `You are Ladex AI, an exceptionally smart, friendly, and versatile AI assistant. 
+Your primary goal is to assist users with accurate information, creative problem-solving, and clear explanations.
+Always be concise, engaging, and directly address the user's request.`;
+
+const CREATIVE_SYSTEM_PROMPTS: Record<string, string> = {
+  story: `You are Ladex AI's Creative Engine. Write an engaging, vivid short story based on the user's topic.`,
+  poem: `You are Ladex AI's Creative Engine. Write an expressive, vivid poem based on the user's topic.`,
+  dialogue: `You are Ladex AI's Creative Engine. Write an engaging dialogue/script scene based on the user's topic.`,
+  projectIdeas: `You are Ladex AI's Creative Engine. Brainstorm a clear, practical list of project ideas based on the user's topic.`,
+};
+
+const GAME_SYSTEM_PROMPTS: Record<string, string> = {
+  hangman: `You are Ladex AI Game Master. Start a text-based Hangman game using the given subject as the secret word/phrase. Show blanks and guide the player.`,
+  "20questions": `You are Ladex AI Game Master. Start a text-based 20 Questions game where the given subject is the answer. Let the player ask yes/no questions.`,
+  wordjumble: `You are Ladex AI Game Master. Create a word jumble puzzle from the given subject and prompt the player to unscramble it.`,
+};
+
+const CODE_SYSTEM_PROMPT = `You are Ladex AI's Expert Software Engineer.
+Provide clean, idiomatic, well-commented code solutions in the requested language.
+Explain technical concepts simply and highlight best practices.`;
+
+const TRANSLATION_SYSTEM_PROMPT = `You are Ladex AI's Translation & Localization Expert.
+Translate the user input accurately into the requested target language while preserving tone, cultural nuances, and context.`;
+
+const DATASET_SYSTEM_PROMPT = `You are Ladex AI's Data Analyst.
+Analyze the provided dataset or structured data carefully. Summarize key insights, trends, statistical distributions, and potential anomalies clearly.`;
+
+const SEARCH_DECISION_SYSTEM_PROMPT = `You are a search decision assistant. Analyze the latest user message in context. Respond ONLY in valid JSON format: {"needs_search": true/false, "search_query": "query if search needed else empty"}`;
+
+// --- Core Chat Execution Function ---
+export async function geminiChat(
   messages: ChatMessage[],
-  options?: { maxTokens?: number; temperature?: number },
+  searchResults?: SearchResult[]
 ): Promise<string> {
-  const completion = await openai.chat.completions.create({
-    model: GEMINI_MODEL,
-    messages,
-    max_tokens: options?.maxTokens ?? 1024,
-    temperature: options?.temperature ?? 0.7,
-  });
-
-  const content = completion.choices?.[0]?.message?.content?.trim();
-  if (!content) {
-    throw new Error("Gemini returned an empty response.");
-  }
-  return content;
-}
-
-export async function decideSearch(
-  userText: string,
-  history: ChatMessage[] = [],
-): Promise<SearchDecision> {
-  const messages: ChatMessage[] = [
-    {
-      role: "system",
-      content: `You are a search router. Decide whether the user query needs live, up-to-date web research to answer accurately. Respond with valid JSON only, no additional text.
-Return exactly:
-{"needs_search": boolean, "search_query": string}`,
-    },
-    ...history,
-    {
-      role: "user",
-      content: userText,
-    },
-  ];
-
-  const raw = await geminiChat(messages, { maxTokens: 80, temperature: 0.0 });
-
   try {
-    const parsed = JSON.parse(raw) as SearchDecision;
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      typeof parsed.needs_search === "boolean" &&
-      typeof parsed.search_query === "string"
-    ) {
-      return parsed;
-    }
-  } catch {
-    // fall through to default below
-  }
+    const formattedMessages: ChatMessage[] = [...messages];
 
-  return { needs_search: false, search_query: userText };
+    if (searchResults && searchResults.length > 0) {
+      const context = searchResults
+        .map((r) => `Title: ${r.title}\nURL: ${r.url}\nContent: ${r.content}`)
+        .join("\n\n");
+      formattedMessages.push({
+        role: "system",
+        content: `Web Search Context:\n${context}`,
+      });
+    }
+
+    const response = await openai.chat.completions.create({
+      model: GEMINI_MODEL,
+      messages: formattedMessages,
+    });
+
+    return response.choices[0]?.message?.content || "No response generated.";
+  } catch (error) {
+    console.error("Error in geminiChat:", error);
+    throw error;
+  }
 }
 
+// --- Conversation reply (matches bot.ts: userText, history, searchResults) ---
 export async function generateConversationReply(
   userText: string,
-  history: ChatMessage[] = [],
-  searchResults: SearchResult[] = [],
+  history: ChatMessage[],
+  searchResults?: SearchResult[]
 ): Promise<string> {
   const messages: ChatMessage[] = [
-    {
-      role: "system",
-      content: CORE_INTELLIGENCE_SYSTEM_PROMPT,
-    },
-    ...history,
+    { role: "system", content: CORE_INTELLIGENCE_SYSTEM_PROMPT },
+    ...(history.length > 0 ? history : [{ role: "user" as const, content: userText }]),
   ];
+  return geminiChat(messages, searchResults);
+}
 
-  let effectiveUserText = userText;
+// --- Search decision (matches bot.ts: userText, history) ---
+export async function decideSearch(
+  userText: string,
+  history: ChatMessage[] = []
+): Promise<SearchDecision> {
+  try {
+    const messages: ChatMessage[] = [
+      { role: "system", content: SEARCH_DECISION_SYSTEM_PROMPT },
+      ...(history.length > 0 ? history : [{ role: "user" as const, content: userText }]),
+    ];
 
-  if (searchResults.length > 0) {
-    const resultText = searchResults
-      .slice(0, 5)
-      .map(
-        (result, index) =>
-          `[Source ${index + 1}] ${result.title}\nURL: ${result.url}\n${result.content.slice(
-            0,
-            600,
-          )}`,
-      )
-      .join("\n\n---\n\n");
+    const response = await openai.chat.completions.create({
+      model: GEMINI_MODEL,
+      messages,
+      response_format: { type: "json_object" },
+    });
 
-    effectiveUserText =
-      `The user asked: ${userText}\n\n` +
-      `Use the following real-time findings to answer the question accurately. ` +
-      `When the results are directly relevant, cite them briefly. ` +
-      `If they are not relevant, rely on your broader knowledge and say so.
-
-` +
-      `=== LIVE RESEARCH RESULTS ===\n${resultText}\n=== END OF RESULTS ===`;
+    const content = response.choices[0]?.message?.content || "{}";
+    const parsed = JSON.parse(content);
+    return {
+      needs_search: Boolean(parsed.needs_search),
+      search_query: parsed.search_query || "",
+    };
+  } catch (error) {
+    console.error("Error in decideSearch:", error);
+    return { needs_search: false, search_query: "" };
   }
-
-  messages.push({ role: "user", content: effectiveUserText });
-  return geminiChat(messages, { maxTokens: 1024, temperature: 0.65 });
 }
 
-export async function generateTranslation(
-  text: string,
-  targetLanguage = "English",
-): Promise<string> {
-  const prompt =
-    `Translate the following text into ${targetLanguage}. Keep the meaning, tone, and context accurate. ` +
-    `If the input is already in ${targetLanguage}, confirm that and return the original text.
-
-Text:\n"""${text}"""`;
-
-  return geminiChat([
-    { role: "system", content: CORE_INTELLIGENCE_SYSTEM_PROMPT },
-    { role: "user", content: prompt },
-  ]);
-}
-
+// --- Creative output (matches bot.ts: type, topic) ---
 export async function generateCreativeOutput(
-  creativeType: "story" | "poem" | "dialogue" | "projectIdeas",
-  topic: string,
+  type: "story" | "poem" | "dialogue" | "projectIdeas",
+  topic: string
 ): Promise<string> {
-  const creativeInstructions: Record<string, string> = {
-    story: `Write an original short story about ${topic}. Use vivid detail, a clear beginning, middle, and end, and keep the language easy to follow.`,
-    poem: `Write an original poem about ${topic}. Use poetic imagery, rhythm, and emotion. Keep it concise and engaging.`,
-    dialogue: `Write a dialogue between two characters about ${topic}. Make the voices distinct and the exchange natural.`,
-    projectIdeas: `Generate five practical project ideas related to ${topic}. For each idea, give a one-sentence summary and one reason why it is interesting to build.`,
-  };
-
-  const prompt = creativeInstructions[creativeType];
+  const systemPrompt = CREATIVE_SYSTEM_PROMPTS[type] ?? CREATIVE_SYSTEM_PROMPTS.story;
   return geminiChat([
-    { role: "system", content: CORE_INTELLIGENCE_SYSTEM_PROMPT },
-    { role: "user", content: prompt },
+    { role: "system", content: systemPrompt },
+    { role: "user", content: topic },
   ]);
 }
 
+// --- Game generation (matches bot.ts: gameType, subject) ---
 export async function generateGame(
   gameType: "hangman" | "20questions" | "wordjumble",
-  subject: string,
+  subject: string
 ): Promise<string> {
-  const normalized = gameType.toLowerCase();
-  let prompt = "";
-
-  if (normalized === "hangman") {
-    prompt =
-      `Create a playable Hangman puzzle using the subject: ${subject}. ` +
-      `Provide the word or phrase as blanks, list the rules, and include the first guess prompt. ` +
-      `Do not reveal the answer.`;
-  } else if (normalized === "20questions") {
-    prompt =
-      `Start a 20 Questions game using the theme: ${subject}. ` +
-      `Explain the rules, think of a secret answer, and invite the user to ask yes/no questions.`;
-  } else if (normalized === "wordjumble") {
-    prompt =
-      `Create a Word Jumble puzzle using the subject: ${subject}. ` +
-      `Provide the scrambled word, a short clue, and instructions for how the player should solve it.`;
-  } else {
-    prompt =
-      `Create a simple text-based game using the subject: ${subject}. ` +
-      `Keep it fun and easy to play with one short message.`;
-  }
-
+  const systemPrompt = GAME_SYSTEM_PROMPTS[gameType] ?? GAME_SYSTEM_PROMPTS.hangman;
   return geminiChat([
-    { role: "system", content: CORE_INTELLIGENCE_SYSTEM_PROMPT },
-    { role: "user", content: prompt },
+    { role: "system", content: systemPrompt },
+    { role: "user", content: subject },
   ]);
 }
 
+// --- Code snippet (matches bot.ts: prompt, language) ---
 export async function generateCodeSnippet(
-  request: string,
-  language = "JavaScript",
+  prompt: string,
+  language: string
 ): Promise<string> {
-  const prompt =
-    `Create a clean, runnable ${language} code sample or script for the following request:\n` +
-    `${request}\n\n` +
-    `If a complete script is appropriate, include any required imports and a short usage note. ` +
-    `Keep comments minimal and focus on readability.`;
-
   return geminiChat([
-    { role: "system", content: CORE_INTELLIGENCE_SYSTEM_PROMPT },
+    { role: "system", content: `${CODE_SYSTEM_PROMPT} Requested language: ${language}.` },
     { role: "user", content: prompt },
   ]);
 }
 
-export async function analyzeDataset(
-  data: unknown,
-  question: string,
+// --- Translation (already matched bot.ts: text, targetLanguage) ---
+export async function generateTranslation(
+  text: string,
+  targetLanguage: string
 ): Promise<string> {
-  const payload =
-    typeof data === "string" ? data : JSON.stringify(data, null, 2);
-
-  const prompt =
-    `You are a data analyst. Review the dataset below and answer the question clearly and directly. ` +
-    `If there are numerical patterns or anomalies, explain them and provide practical insights.
-
-Dataset:\n${payload}\n\nQuestion: ${question}`;
-
   return geminiChat([
-    { role: "system", content: CORE_INTELLIGENCE_SYSTEM_PROMPT },
-    { role: "user", content: prompt },
+    { role: "system", content: `${TRANSLATION_SYSTEM_PROMPT} Target Language: ${targetLanguage}` },
+    { role: "user", content: text },
+  ]);
+}
+
+// --- Dataset analysis (already matched bot.ts: data) ---
+export async function analyzeDataset(data: string): Promise<string> {
+  return geminiChat([
+    { role: "system", content: DATASET_SYSTEM_PROMPT },
+    { role: "user", content: data },
   ]);
 }
