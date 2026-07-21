@@ -1,22 +1,21 @@
-export type Json2VideoJobResponse = {
+export type VideoJobResponse = {
   jobId: string;
-  statusUrl: string;
   raw: unknown;
 };
 
-const JSON2VIDEO_API_URL = "https://api.json2video.com/v2/movies";
+const MAGIC_HOUR_BASE_URL = "https://api.magichour.ai/v1";
 
-function getJson2VideoApiKey(): string {
-  const apiKey = process.env["JSON2VIDEO_API_KEY"];
+function getMagicHourApiKey(): string {
+  const apiKey = process.env["MAGIC_HOUR_API_KEY"];
   if (!apiKey) {
-    throw new Error("JSON2VIDEO_API_KEY is not set");
+    throw new Error("MAGIC_HOUR_API_KEY is not set");
   }
   return apiKey;
 }
 
-function getJson2VideoHeaders(): Record<string, string> {
+function getMagicHourHeaders(): Record<string, string> {
   return {
-    "x-api-key": getJson2VideoApiKey(),
+    Authorization: `Bearer ${getMagicHourApiKey()}`,
     "Content-Type": "application/json",
     Accept: "application/json",
   };
@@ -25,73 +24,63 @@ function getJson2VideoHeaders(): Record<string, string> {
 export async function createVideoJob(
   prompt: string,
   orientation: "horizontal" | "vertical" = "horizontal",
-  durationSeconds = 20,
-): Promise<Json2VideoJobResponse> {
-  if (durationSeconds <= 0 || durationSeconds > 60) {
-    throw new Error("Video duration must be between 1 and 60 seconds.");
-  }
+  durationSeconds = 5,
+): Promise<VideoJobResponse> {
+  const clampedDuration = Math.min(Math.max(durationSeconds, 3), 15);
 
-  const aspectRatio = orientation === "vertical" ? "9:16" : "16:9";
   const payload = {
-    input: {
-      prompt,
-      duration: durationSeconds,
-      aspect_ratio: aspectRatio,
-      format: "mp4",
-      voice: "neutral",
-    },
+    name: "Telegram Bot Video",
+    end_seconds: clampedDuration,
+    orientation: orientation === "vertical" ? "portrait" : "landscape",
+    resolution: "720p",
+    style: { prompt },
   };
 
-  const response = await fetch(JSON2VIDEO_API_URL, {
+  const response = await fetch(`${MAGIC_HOUR_BASE_URL}/text-to-video`, {
     method: "POST",
-    headers: getJson2VideoHeaders(),
+    headers: getMagicHourHeaders(),
     body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`JSON2Video job creation failed (${response.status}): ${body}`);
+    throw new Error(`Magic Hour job creation failed (${response.status}): ${body}`);
   }
 
   const body = await response.json();
   const result = body as Record<string, unknown>;
-  const jobId = String(result.project ?? result.id ?? result.jobId ?? "");
-  const statusUrl = `${JSON2VIDEO_API_URL}?project=${encodeURIComponent(jobId)}`;
+  const jobId = String(result.id ?? "");
 
   if (!jobId) {
-    throw new Error(`Unable to parse JSON2Video job ID from response: ${JSON.stringify(body)}`);
+    throw new Error(`Unable to parse Magic Hour job ID from response: ${JSON.stringify(body)}`);
   }
 
-  return { jobId, statusUrl, raw: body };
+  return { jobId, raw: body };
 }
 
 export async function fetchVideoStatus(jobId: string): Promise<{
   status: string;
-  progress: number;
   downloadUrl?: string;
   raw: unknown;
 }> {
-  const statusUrl = `${JSON2VIDEO_API_URL}?project=${encodeURIComponent(jobId)}`;
-  const response = await fetch(statusUrl, {
+  const response = await fetch(`${MAGIC_HOUR_BASE_URL}/video-projects/${encodeURIComponent(jobId)}`, {
     method: "GET",
-    headers: getJson2VideoHeaders(),
+    headers: getMagicHourHeaders(),
   });
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`JSON2Video status check failed (${response.status}): ${body}`);
+    throw new Error(`Magic Hour status check failed (${response.status}): ${body}`);
   }
 
   const body = await response.json();
   const result = body as Record<string, unknown>;
-  const movie = (result.movie as Record<string, unknown>) ?? result;
-  const status = String(movie.status ?? result.status ?? "unknown");
-  const progress = Number(movie.progress ?? (status === "done" || status === "completed" ? 100 : 0));
-  const downloadUrl = String(movie.url ?? result.url ?? "");
+  const status = String(result.status ?? "unknown");
+  const downloads = (result.downloads as Array<Record<string, unknown>>) ?? [];
+  const downloadUrl = downloads.length > 0 ? String(downloads[0]?.url ?? "") : "";
 
   return {
     status,
-    progress: Number.isFinite(progress) ? progress : 0,
     downloadUrl: downloadUrl || undefined,
     raw: body,
   };
@@ -110,23 +99,21 @@ export async function pollVideoCompletion(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const status = await fetchVideoStatus(jobId);
-    if (status.progress >= 100 || status.status.toLowerCase() === "done" || status.status.toLowerCase() === "completed") {
+    const normalizedStatus = status.status.toLowerCase();
+
+    if (normalizedStatus === "complete" || normalizedStatus === "completed") {
       if (!status.downloadUrl) {
-        throw new Error(
-          `Video finished processing but the download link is missing for job ${jobId}`,
-        );
+        throw new Error(`Video finished but no download link was returned for job ${jobId}`);
       }
       return { downloadUrl: status.downloadUrl, status: status.status, raw: status.raw };
     }
 
-    if (status.status.toLowerCase() === "error" || status.status.toLowerCase() === "failed") {
-      throw new Error(`JSON2Video job ${jobId} failed.`);
+    if (normalizedStatus === "error" || normalizedStatus === "failed") {
+      throw new Error(`Magic Hour job ${jobId} failed.`);
     }
 
     await sleep(intervalMs);
   }
 
-  throw new Error(
-    `JSON2Video job ${jobId} did not complete within the expected polling window.`,
-  );
+  throw new Error(`Magic Hour job ${jobId} did not complete within the expected polling window.`);
 }
