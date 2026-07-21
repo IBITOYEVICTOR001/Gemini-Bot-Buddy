@@ -1,9 +1,14 @@
 import OpenAI from "openai";
 
-const openai = new OpenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-});
+export type ChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+export type SearchDecision = {
+  needs_search: boolean;
+  search_query: string;
+};
 
 export type SearchResult = {
   title: string;
@@ -11,22 +16,12 @@ export type SearchResult = {
   content: string;
 };
 
-const GEMINI_MODEL = process.env["GEMINI_MODEL"]
-  ? process.env["GEMINI_MODEL"].replace(/^models\//, "")
-  : "gemini-1.5-flash";
+const GEMINI_MODEL = (process.env["GEMINI_MODEL"] || "gemini-2.5-flash").replace(/^models\//, "");
 
-let geminiClient: OpenAI | null = null;
-
-function getGeminiClient(): OpenAI {
-  if (!geminiClient) {
-    const apiKey = process.env["GEMINI_API_KEY"];
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not set");
-    }
-    geminiClient = new OpenAI({ apiKey, baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/" });
-  }
-  return geminiClient;
-}
+const openai = new OpenAI({
+  apiKey: process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY,
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+});
 
 const CORE_INTELLIGENCE_SYSTEM_PROMPT = `You are a versatile AI assistant for conversational chat, teaching, research framing, creativity, project ideation, games, translation, clean code generation, and data analytics.
 Use simple, easy-to-understand explanations when defining concepts or breaking down complex topics.
@@ -40,9 +35,7 @@ async function geminiChat(
   messages: ChatMessage[],
   options?: { maxTokens?: number; temperature?: number },
 ): Promise<string> {
-  const client = getGeminiClient();
-
-  const completion = await client.chat.completions.create({
+  const completion = await openai.chat.completions.create({
     model: GEMINI_MODEL,
     messages,
     max_tokens: options?.maxTokens ?? 1024,
