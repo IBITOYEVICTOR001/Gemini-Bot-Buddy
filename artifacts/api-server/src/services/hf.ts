@@ -21,14 +21,11 @@ function getHfHeaders(addContentType?: string) {
 }
 
 export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
-  const response = await fetch(
-    `${HF_BASE_URL}/${TRANSCRIBE_MODEL}`,
-    {
-      method: "POST",
-      headers: getHfHeaders("application/octet-stream"),
-      body: audioBuffer,
-    },
-  );
+  const response = await fetch(`${HF_BASE_URL}/${TRANSCRIBE_MODEL}`, {
+    method: "POST",
+    headers: getHfHeaders("application/octet-stream"),
+    body: audioBuffer,
+  });
 
   if (!response.ok) {
     const body = await response.text();
@@ -36,16 +33,19 @@ export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
   }
 
   const json = await response.json();
-  if (typeof json !== "object" || json === null) {
-    throw new Error("Unexpected Hugging Face transcription response.");
+
+  // Hugging Face Whisper returns an array of objects with "text"
+  let text = "";
+  if (Array.isArray(json) && json.length > 0 && typeof json[0].text === "string") {
+    text = json[0].text;
+  } else if (typeof json === "object" && json !== null) {
+    text =
+      (json as Record<string, unknown>).text?.toString() ||
+      (json as Record<string, unknown>).transcription?.toString() ||
+      "";
   }
 
-  const text =
-    (json as Record<string, unknown>).text ||
-    (json as Record<string, unknown>).transcription ||
-    "";
-
-  return String(text).trim();
+  return text.trim();
 }
 
 export async function synthesizeSpeech(text: string): Promise<Buffer> {
