@@ -1,5 +1,5 @@
 // hf-tts-transcribe.ts
-const HF_BASE_URL = "https://api-inference.huggingface.co/models";
+const HF_BASE_URL = "https://router.huggingface.co/hf-inference/models";
 const TRANSCRIBE_MODEL = "openai/whisper-large-v3";
 const TTS_MODEL = "facebook/mms-tts-eng";
 
