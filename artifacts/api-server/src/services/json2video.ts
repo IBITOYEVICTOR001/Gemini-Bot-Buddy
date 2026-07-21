@@ -16,7 +16,7 @@ function getJson2VideoApiKey(): string {
 
 function getJson2VideoHeaders(): Record<string, string> {
   return {
-    Authorization: `Bearer ${getJson2VideoApiKey()}`,
+    "x-api-key": getJson2VideoApiKey(),
     "Content-Type": "application/json",
     Accept: "application/json",
   };
@@ -54,14 +54,9 @@ export async function createVideoJob(
   }
 
   const body = await response.json();
-  const jobId =
-    String((body as Record<string, unknown>).id ?? (body as Record<string, unknown>).jobId ?? "");
-  const statusUrl =
-    String(
-      (body as Record<string, unknown>).statusUrl ??
-        (body as Record<string, unknown>).url ??
-        `${JSON2VIDEO_API_URL}/${jobId}`,
-    );
+  const result = body as Record<string, unknown>;
+  const jobId = String(result.project ?? result.id ?? result.jobId ?? "");
+  const statusUrl = `${JSON2VIDEO_API_URL}?project=${encodeURIComponent(jobId)}`;
 
   if (!jobId) {
     throw new Error(`Unable to parse JSON2Video job ID from response: ${JSON.stringify(body)}`);
@@ -76,7 +71,7 @@ export async function fetchVideoStatus(jobId: string): Promise<{
   downloadUrl?: string;
   raw: unknown;
 }> {
-  const statusUrl = `${JSON2VIDEO_API_URL}/${encodeURIComponent(jobId)}`;
+  const statusUrl = `${JSON2VIDEO_API_URL}?project=${encodeURIComponent(jobId)}`;
   const response = await fetch(statusUrl, {
     method: "GET",
     headers: getJson2VideoHeaders(),
@@ -89,16 +84,10 @@ export async function fetchVideoStatus(jobId: string): Promise<{
 
   const body = await response.json();
   const result = body as Record<string, unknown>;
-  const status = String(result.status ?? result.state ?? "unknown");
-  const progress = Number(result.progress ?? (result.status === "completed" ? 100 : 0));
-  const downloadUrl =
-    String(
-      result.download_url ??
-        result.downloadUrl ??
-        (result.result as Record<string, unknown>)?.download_url ??
-        (result.result as Record<string, unknown>)?.downloadUrl ??
-        "",
-    );
+  const movie = (result.movie as Record<string, unknown>) ?? result;
+  const status = String(movie.status ?? result.status ?? "unknown");
+  const progress = Number(movie.progress ?? (status === "done" || status === "completed" ? 100 : 0));
+  const downloadUrl = String(movie.url ?? result.url ?? "");
 
   return {
     status,
@@ -121,7 +110,7 @@ export async function pollVideoCompletion(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const status = await fetchVideoStatus(jobId);
-    if (status.progress >= 100 || status.status.toLowerCase() === "completed") {
+    if (status.progress >= 100 || status.status.toLowerCase() === "done" || status.status.toLowerCase() === "completed") {
       if (!status.downloadUrl) {
         throw new Error(
           `Video finished processing but the download link is missing for job ${jobId}`,
@@ -130,7 +119,7 @@ export async function pollVideoCompletion(
       return { downloadUrl: status.downloadUrl, status: status.status, raw: status.raw };
     }
 
-    if (status.status.toLowerCase() === "failed") {
+    if (status.status.toLowerCase() === "error" || status.status.toLowerCase() === "failed") {
       throw new Error(`JSON2Video job ${jobId} failed.`);
     }
 
