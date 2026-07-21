@@ -239,9 +239,17 @@ async function handleDocumentMessage(chatId: number, bot: TelegramBot, msg: Mess
   }
 }
 
+let bot: TelegramBot;
+
+export function getBot(): TelegramBot {
+  if (!bot) throw new Error("Bot not initialized yet");
+  return bot;
+}
+
 export async function startBot(): Promise<void> {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
   const geminiKey = process.env["GEMINI_API_KEY"];
+  const webhookUrl = process.env["WEBHOOK_URL"];
 
   if (!token) {
     console.error("[Bot] TELEGRAM_BOT_TOKEN missing — Execution cancelled.");
@@ -253,10 +261,14 @@ export async function startBot(): Promise<void> {
     return;
   }
 
-  const bot = new TelegramBot(token, { polling: false });
-  await bot.deleteWebhook({ drop_pending_updates: true });
-  bot.startPolling({ restart: true });
-  logger.info("[Bot] Telegram polling is active.");
+  if (!webhookUrl) {
+    console.error("[Bot] WEBHOOK_URL missing — Execution cancelled.");
+    return;
+  }
+
+  bot = new TelegramBot(token);
+  await bot.setWebHook(`${webhookUrl}/api/telegram-webhook`);
+  logger.info("[Bot] Telegram webhook set.");
 
   bot.onText(/^\/video\s+(horizontal|vertical)?\s*(\d+)?\s*(.*)$/i, async (msg, match) => {
     if (!msg) return;
@@ -418,8 +430,7 @@ export async function startBot(): Promise<void> {
       await bot.sendMessage(chatId, FALLBACK_MESSAGE);
     }
   });
-
-  bot.on("polling_error", (error) => {
-    logger.error({ err: error.message }, "Polling error");
+bot.on("webhook_error", (error) => {
+    logger.error({ err: error.message }, "Webhook error");
   });
 }
