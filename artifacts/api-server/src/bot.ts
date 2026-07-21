@@ -81,27 +81,21 @@ async function handleVideoGen(
   bot: TelegramBot,
   prompt: string,
   orientation: "horizontal" | "vertical" = "horizontal",
-  durationSeconds = 20,
 ): Promise<void> {
   await bot.sendChatAction(chatId, "typing");
 
-  const job = await createVideoJob(prompt, orientation, durationSeconds);
-  await bot.sendMessage(
-    chatId,
-    `Your video job has been created (job ID: ${job.jobId}). I am checking status until it finishes processing. This may take up to a couple of minutes.`,
-  );
-
-  const completion = await pollVideoCompletion(job.jobId, {
-    intervalMs: 5000,
-    maxAttempts: 20,
-  });
+  const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`;
+  const job = await createVideoJob(prompt, imageUrl, orientation);
 
   await bot.sendMessage(
     chatId,
-    `Your video is ready! Download it here:\n${completion.downloadUrl}`,
+    `Your video job has been created (project ID: ${job.projectId}). Checking status until it finishes. This may take a minute or two.`,
   );
+
+  const completion = await pollVideoCompletion(job.projectId);
+
+  await bot.sendMessage(chatId, `Your video is ready! Download it here:\n${completion.downloadUrl}`);
 }
-
 async function handleVoiceMessage(chatId: number, bot: TelegramBot, msg: Message): Promise<void> {
   const voice = msg.voice;
   if (!voice) return;
@@ -270,25 +264,24 @@ export async function startBot(): Promise<void> {
   await bot.setWebHook(`${webhookUrl}/api/telegram-webhook`);
   logger.info("[Bot] Telegram webhook set.");
 
-  bot.onText(/^\/video\s+(horizontal|vertical)?\s*(\d+)?\s*(.*)$/i, async (msg, match) => {
-    if (!msg) return;
-    const chatId = msg.chat.id;
-    const orientation = (match?.[1] ? match[1].toLowerCase() : "horizontal") as "horizontal" | "vertical";
-    const durationSeconds = match?.[2] ? Number(match[2]) : 20;
-    const prompt = match?.[3]?.trim();
-    if (!prompt) {
-      await bot.sendMessage(chatId, "Usage: /video [horizontal|vertical] [duration] your prompt");
-      return;
-    }
+bot.onText(/^\/video\s+(horizontal|vertical)?\s*(.*)$/i, async (msg, match) => {
+  if (!msg) return;
+  const chatId = msg.chat.id;
+  const orientation = (match?.[1] ? match[1].toLowerCase() : "horizontal") as "horizontal" | "vertical";
+  const prompt = match?.[2]?.trim();
+  if (!prompt) {
+    await bot.sendMessage(chatId, "Usage: /video [horizontal|vertical] your prompt");
+    return;
+  }
 
-    try {
-      await handleVideoGen(chatId, bot, prompt, orientation, durationSeconds);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error({ err: message }, "Video generation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't generate that video right now.");
-    }
-  });
+  try {
+    await handleVideoGen(chatId, bot, prompt, orientation);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, "Video generation failed");
+    await bot.sendMessage(chatId, "Sorry, I couldn't generate that video right now.");
+  }
+});
 
   bot.onText(/^\/say\s+(.+)$/i, async (msg, match) => {
     if (!msg || !match?.[1]) return;
