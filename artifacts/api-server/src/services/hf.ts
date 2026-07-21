@@ -129,11 +129,8 @@ export async function synthesizeSpeech(text: string): Promise<Buffer> {
     const response = await fetch(`${HF_BASE_URL}/${TTS_MODEL}`, {
       method: "POST",
       headers: getHfHeaders("application/json"),
-      body: JSON.stringify({ text_inputs: text }), // changed from { inputs: text }
+      body: JSON.stringify({ text_inputs: text }),
     });
-    // ...rest of the function stays the same
-  });
-}
 
     const contentType = response.headers.get("content-type") || "";
     debugLog("tts content-type:", contentType);
