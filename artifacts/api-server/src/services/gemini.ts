@@ -1,14 +1,9 @@
 import OpenAI from "openai";
 
-export type ChatMessage = {
-  role: "system" | "user" | "assistant";
-  content: string;
-};
-
-export type SearchDecision = {
-  needs_search: boolean;
-  search_query: string;
-};
+const openai = new OpenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/"
+});
 
 export type SearchResult = {
   title: string;
