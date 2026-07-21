@@ -101,6 +101,7 @@ async function handleVoiceMessage(chatId: number, bot: TelegramBot, msg: Message
   if (!voice) return;
 
   await bot.sendChatAction(chatId, "typing");
+  logger.info({ chatId }, "Voice message received, downloading file");
 
   const url = await bot.getFileLink(voice.file_id);
   const response = await fetch(url);
@@ -109,10 +110,13 @@ async function handleVoiceMessage(chatId: number, bot: TelegramBot, msg: Message
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
+  logger.info({ chatId, size: buffer.length }, "Voice file downloaded, sending to Whisper");
+
   const transcript = await transcribeAudio(buffer);
+  logger.info({ chatId }, "Transcription complete");
+
   await bot.sendMessage(chatId, `📝 Transcription:\n${transcript}`);
 }
-
 async function handleTextToSpeech(chatId: number, bot: TelegramBot, text: string): Promise<void> {
   const audioBuffer = await synthesizeSpeech(text);
   await bot.sendAudio(chatId, audioBuffer, {
