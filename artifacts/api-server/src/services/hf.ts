@@ -50,11 +50,20 @@ async function retry<T>(
 
 export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
   return retry(async () => {
-    const response = await fetch(`${HF_BASE_URL}/${TRANSCRIBE_MODEL}`, {
-      method: "POST",
-      headers: getHfHeaders("application/octet-stream"),
-      body: audioBuffer,
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+
+    let response: Response;
+    try {
+      response = await fetch(`${HF_BASE_URL}/${TRANSCRIBE_MODEL}`, {
+        method: "POST",
+        headers: getHfHeaders("application/octet-stream"),
+        body: audioBuffer,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const contentType = response.headers.get("content-type") || "";
     debugLog("transcribe content-type:", contentType);
