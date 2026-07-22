@@ -358,7 +358,34 @@ bot.onText(/^\/video\s+(horizontal|vertical)?\s*(.*)$/i, async (msg, match) => {
       await bot.sendMessage(chatId, "Sorry, I couldn't generate code for that request.");
     }
   });
+bot.onText(/^\/pdf\s+(.+)$/is, async (msg, match) => {
+  if (!msg || !match?.[1]) return;
+  const chatId = msg.chat.id;
+  try {
+    const buffer = await createPdfBuffer("Generated Document", match[1]);
+    await bot.sendDocument(chatId, buffer, {}, { filename: "document.pdf", contentType: "application/pdf" });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, "PDF generation failed");
+    await bot.sendMessage(chatId, "Sorry, I couldn't create that PDF right now.");
+  }
+});
 
+bot.onText(/^\/docx\s+(.+)$/is, async (msg, match) => {
+  if (!msg || !match?.[1]) return;
+  const chatId = msg.chat.id;
+  try {
+    const buffer = await createDocxBuffer("Generated Document", match[1]);
+    await bot.sendDocument(chatId, buffer, {}, {
+      filename: "document.docx",
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, "DOCX generation failed");
+    await bot.sendMessage(chatId, "Sorry, I couldn't create that Word document right now.");
+  }
+});
   bot.on("voice", async (msg) => {
     const chatId = msg.chat.id;
     try {
