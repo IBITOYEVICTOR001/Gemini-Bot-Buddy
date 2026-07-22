@@ -10,6 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "pdfkit": "^0.15.0",
+    "docx": "^9.0.0",
     "@tavily/core": "^0.7.6",
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
