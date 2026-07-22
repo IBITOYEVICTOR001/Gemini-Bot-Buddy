@@ -143,7 +143,7 @@ async function runOcr(imageBuffer: Buffer): Promise<string> {
   formData.append("isOverlayRequired", "false");
   formData.append("detectOrientation", "true");
   formData.append("scale", "true");
-  formData.append("file", imageBuffer, "image.jpg");
+  formData.append("file", new Blob([imageBuffer], { type: "image/jpeg" }), "image.jpg");
 
   const res = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
