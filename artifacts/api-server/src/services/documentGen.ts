@@ -1,19 +1,48 @@
-import PDFDocument from "pdfkit";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from "docx";
 
 export async function createPdfBuffer(title: string, content: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument();
-    const chunks: Buffer[] = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+  const pdfDoc = await PDFDocument.create();
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fontSize = 12;
+  const margin = 50;
 
-    doc.fontSize(20).text(title, { align: "center" });
-    doc.moveDown();
-    doc.fontSize(12).text(content);
-    doc.end();
-  });
+  let page = pdfDoc.addPage();
+  let { width, height } = page.getSize();
+  let y = height - margin;
+
+  page.drawText(title, { x: margin, y, size: 20, font });
+  y -= 40;
+
+  const maxWidth = width - margin * 2;
+  const words = content.split(/\s+/);
+  let line = "";
+  const lines: string[] = [];
+
+  for (const word of words) {
+    const testLine = line ? `${line} ${word}` : word;
+    const testWidth = font.widthOfTextAtSize(testLine, fontSize);
+    if (testWidth > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = testLine;
+    }
+  }
+  if (line) lines.push(line);
+
+  for (const l of lines) {
+    if (y < margin) {
+      page = pdfDoc.addPage();
+      ({ width, height } = page.getSize());
+      y = height - margin;
+    }
+    page.drawText(l, { x: margin, y, size: fontSize, font });
+    y -= fontSize + 4;
+  }
+
+  const pdfBytes = await pdfDoc.save();
+  return Buffer.from(pdfBytes);
 }
 
 export async function createDocxBuffer(title: string, content: string): Promise<Buffer> {
