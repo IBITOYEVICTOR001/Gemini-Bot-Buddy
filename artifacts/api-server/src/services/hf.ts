@@ -57,7 +57,7 @@ export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
     try {
       response = await fetch(`${HF_BASE_URL}/${TRANSCRIBE_MODEL}`, {
         method: "POST",
-        headers: getHfHeaders("application/octet-stream"),
+        headers: getHfHeaders("audio/ogg"),
         body: audioBuffer,
         signal: controller.signal,
       });
