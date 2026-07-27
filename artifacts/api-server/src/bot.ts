@@ -1,5 +1,4 @@
 import { createPdfBuffer, createDocxBuffer, createXlsxBuffer, createPptxBuffer } from "./services/documentGen";
-import { createPdfBuffer, createDocxBuffer } from "./services/documentGen";
 import TelegramBot from "node-telegram-bot-api";
 import type { Message } from "node-telegram-bot-api";
 import axios from "axios";
@@ -98,6 +97,7 @@ async function handleVideoGen(
 
   await bot.sendMessage(chatId, `Your video is ready! Download it here:\n${completion.downloadUrl}`);
 }
+
 async function handleVoiceMessage(chatId: number, bot: TelegramBot, msg: Message): Promise<void> {
   const voice = msg.voice;
   if (!voice) return;
@@ -119,6 +119,7 @@ async function handleVoiceMessage(chatId: number, bot: TelegramBot, msg: Message
 
   await bot.sendMessage(chatId, `📝 Transcription:\n${transcript}`);
 }
+
 async function handleTextToSpeech(chatId: number, bot: TelegramBot, text: string): Promise<void> {
   const audioBuffer = await synthesizeSpeech(text);
   await bot.sendAudio(chatId, audioBuffer, {
@@ -270,24 +271,24 @@ export async function startBot(): Promise<void> {
   await bot.setWebHook(`${webhookUrl}/api/telegram-webhook`);
   logger.info("[Bot] Telegram webhook set.");
 
-bot.onText(/^\/video\s+(horizontal|vertical)?\s*(.*)$/i, async (msg, match) => {
-  if (!msg) return;
-  const chatId = msg.chat.id;
-  const orientation = (match?.[1] ? match[1].toLowerCase() : "horizontal") as "horizontal" | "vertical";
-  const prompt = match?.[2]?.trim();
-  if (!prompt) {
-    await bot.sendMessage(chatId, "Usage: /video [horizontal|vertical] your prompt");
-    return;
-  }
+  bot.onText(/^\/video\s+(horizontal|vertical)?\s*(.*)$/i, async (msg, match) => {
+    if (!msg) return;
+    const chatId = msg.chat.id;
+    const orientation = (match?.[1] ? match[1].toLowerCase() : "horizontal") as "horizontal" | "vertical";
+    const prompt = match?.[2]?.trim();
+    if (!prompt) {
+      await bot.sendMessage(chatId, "Usage: /video [horizontal|vertical] your prompt");
+      return;
+    }
 
-  try {
-    await handleVideoGen(chatId, bot, prompt, orientation);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err: message }, "Video generation failed");
-    await bot.sendMessage(chatId, "Sorry, I couldn't generate that video right now.");
-  }
-});
+    try {
+      await handleVideoGen(chatId, bot, prompt, orientation);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Video generation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't generate that video right now.");
+    }
+  });
 
   bot.onText(/^\/say\s+(.+)$/i, async (msg, match) => {
     if (!msg || !match?.[1]) return;
@@ -359,34 +360,70 @@ bot.onText(/^\/video\s+(horizontal|vertical)?\s*(.*)$/i, async (msg, match) => {
       await bot.sendMessage(chatId, "Sorry, I couldn't generate code for that request.");
     }
   });
-bot.onText(/^\/pdf\s+(.+)$/is, async (msg, match) => {
-  if (!msg || !match?.[1]) return;
-  const chatId = msg.chat.id;
-  try {
-    const buffer = await createPdfBuffer("Generated Document", match[1]);
-    await bot.sendDocument(chatId, buffer, {}, { filename: "document.pdf", contentType: "application/pdf" });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err: message }, "PDF generation failed");
-    await bot.sendMessage(chatId, "Sorry, I couldn't create that PDF right now.");
-  }
-});
 
-bot.onText(/^\/docx\s+(.+)$/is, async (msg, match) => {
-  if (!msg || !match?.[1]) return;
-  const chatId = msg.chat.id;
-  try {
-    const buffer = await createDocxBuffer("Generated Document", match[1]);
-    await bot.sendDocument(chatId, buffer, {}, {
-      filename: "document.docx",
-      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err: message }, "DOCX generation failed");
-    await bot.sendMessage(chatId, "Sorry, I couldn't create that Word document right now.");
-  }
-});
+  bot.onText(/^\/pdf\s+(.+)$/is, async (msg, match) => {
+    if (!msg || !match?.[1]) return;
+    const chatId = msg.chat.id;
+    try {
+      const buffer = await createPdfBuffer("Generated Document", match[1]);
+      await bot.sendDocument(chatId, buffer, {}, { filename: "document.pdf", contentType: "application/pdf" });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "PDF generation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't create that PDF right now.");
+    }
+  });
+
+  bot.onText(/^\/docx\s+(.+)$/is, async (msg, match) => {
+    if (!msg || !match?.[1]) return;
+    const chatId = msg.chat.id;
+    try {
+      const buffer = await createDocxBuffer("Generated Document", match[1]);
+      await bot.sendDocument(chatId, buffer, {}, {
+        filename: "document.docx",
+        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "DOCX generation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't create that Word document right now.");
+    }
+  });
+
+  bot.onText(/^\/excel\s+(.+)$/is, async (msg, match) => {
+    if (!msg || !match?.[1]) return;
+    const chatId = msg.chat.id;
+    try {
+      const rows = match[1].split(";").map((row) => row.split(",").map((cell) => cell.trim()));
+      const buffer = await createXlsxBuffer("Generated Sheet", rows);
+      await bot.sendDocument(chatId, buffer, {}, {
+        filename: "spreadsheet.xlsx",
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Excel generation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't create that spreadsheet right now.");
+    }
+  });
+
+  bot.onText(/^\/ppt\s+(.+)$/is, async (msg, match) => {
+    if (!msg || !match?.[1]) return;
+    const chatId = msg.chat.id;
+    try {
+      const slides = match[1].split("|").map((s) => s.trim()).filter(Boolean);
+      const buffer = await createPptxBuffer("Generated Presentation", slides);
+      await bot.sendDocument(chatId, buffer, {}, {
+        filename: "presentation.pptx",
+        contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "PowerPoint generation failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't create that presentation right now.");
+    }
+  });
+
   bot.on("voice", async (msg) => {
     const chatId = msg.chat.id;
     try {
