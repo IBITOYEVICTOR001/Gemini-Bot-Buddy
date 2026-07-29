@@ -1,3 +1,4 @@
+import { searchYoutubeVideos } from "./services/youtube";
 import { createPdfBuffer, createDocxBuffer, createXlsxBuffer, createPptxBuffer } from "./services/documentGen";
 import TelegramBot from "node-telegram-bot-api";
 import type { Message } from "node-telegram-bot-api";
