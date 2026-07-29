@@ -425,6 +425,32 @@ export async function startBot(): Promise<void> {
     }
   });
 
+  bot.onText(/^\/youtube\s+(.+)$/i, async (msg, match) => {
+    if (!msg || !match?.[1]) return;
+    const chatId = msg.chat.id;
+    const query = match[1].trim();
+
+    try {
+      await bot.sendChatAction(chatId, "typing");
+      const results = await searchYoutubeVideos(query, 5);
+
+      if (results.length === 0) {
+        await bot.sendMessage(chatId, "I couldn't find any videos for that search.");
+        return;
+      }
+
+      const reply = results
+        .map((video, i) => `${i + 1}. ${video.title} — ${video.channelTitle}\n${video.url}`)
+        .join("\n\n");
+
+      await bot.sendMessage(chatId, reply);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "YouTube search failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't search YouTube right now.");
+    }
+  });
+
   bot.on("voice", async (msg) => {
     const chatId = msg.chat.id;
     try {
