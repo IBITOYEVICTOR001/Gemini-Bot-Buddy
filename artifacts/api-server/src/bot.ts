@@ -425,6 +425,52 @@ export async function startBot(): Promise<void> {
     }
   });
 
+  bot.onText(/^\/imagesearch\s+(.+)$/i, async (msg, match) => {
+    if (!msg || !match?.[1]) return;
+    const chatId = msg.chat.id;
+    const query = match[1].trim();
+
+    try {
+      await bot.sendChatAction(chatId, "upload_photo");
+
+      const apiKey = process.env["SERPER_API_KEY"];
+      if (!apiKey) {
+        await bot.sendMessage(chatId, "Image search is not configured on this bot right now.");
+        return;
+      }
+
+      const response = await fetch("https://google.serper.dev/images", {
+        method: "POST",
+        headers: {
+          "X-API-KEY": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ q: query }),
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Serper image search failed (${response.status}): ${body}`);
+      }
+
+      const data = (await response.json()) as { images?: Array<{ imageUrl?: string }> };
+      const images = (data.images ?? []).map((img) => img.imageUrl).filter(Boolean).slice(0, 3);
+
+      if (images.length === 0) {
+        await bot.sendMessage(chatId, "I couldn't find any images for that search.");
+        return;
+      }
+
+      for (const imageUrl of images) {
+        await bot.sendPhoto(chatId, imageUrl as string);
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err: message }, "Image search failed");
+      await bot.sendMessage(chatId, "Sorry, I couldn't search for images right now.");
+    }
+  });
+
   bot.onText(/^\/youtube\s+(.+)$/i, async (msg, match) => {
     if (!msg || !match?.[1]) return;
     const chatId = msg.chat.id;
