@@ -16,6 +16,7 @@ import {
   type ChatMessage,
 } from "./services/groq";
 import { runTavilySearch } from "./services/tavily";
+import { searchSerperImages } from "./services/serperImage";
 import { createVideoJob, pollVideoCompletion } from "./services/json2video";
 import { synthesizeSpeech, transcribeAudio } from "./services/hf";
 import { sendSponsoredAd } from "./services/adsgram";
@@ -88,6 +89,43 @@ function extractImageGenPrompt(text: string): string | null {
     .trim();
 
   return stripped.length > 0 ? stripped : "a beautiful fantasy landscape";
+}
+
+function extractImageSearchQuery(text: string): string | null {
+  const patterns = [
+    /^\s*(?:show|send|find|get)\s+me\s+(?:some\s+|an?\s+)?(?:pictures?|photos?|images?)\s+(?:of|for)\s+(.+)$/i,
+    /^\s*(?:show|send|find|get)\s+(?:some\s+|an?\s+)?(?:pictures?|photos?|images?)\s+(?:of|for)\s+(.+)$/i,
+    /^\s*(?:i\s+want|can\s+you\s+show\s+me)\s+(?:some\s+|an?\s+)?(?:pictures?|photos?|images?)\s+(?:of|for)\s+(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const query = match?.[1]?.replace(/\b(?:please|for me)\b/gi, "").trim();
+    if (query) return query;
+  }
+
+  return null;
+}
+
+async function handleImageSearch(chatId: number, bot: TelegramBot, query: string): Promise<void> {
+  await bot.sendChatAction(chatId, "upload_photo");
+
+  if (!process.env["SERPER_API_KEY"]) {
+    await bot.sendMessage(chatId, "Image search is not configured on this bot right now. Please add SERPER_API_KEY.");
+    return;
+  }
+
+  const images = await searchSerperImages(query, 3);
+  if (images.length === 0) {
+    await bot.sendMessage(chatId, "I couldn't find any images for that search.");
+    return;
+  }
+
+  for (const image of images) {
+    await bot.sendPhoto(chatId, image.imageUrl, {
+      caption: image.sourceUrl ? `${image.title}\n${image.sourceUrl}` : image.title,
+    });
+  }
 }
 
 async function handleUserMessage(chatId: number, userText: string): Promise<string> {
@@ -458,49 +496,17 @@ export async function startBot(): Promise<void> {
     }
   });
 
-  bot.onText(/^\/imagesearch\s+(.+)$/i, async (msg, match) => {
+  bot.onText(/^\/(?:image|imagesearch)\s+(.+)$/i, async (msg, match) => {
     if (!msg || !match?.[1]) return;
     const chatId = msg.chat.id;
     const query = match[1].trim();
 
     try {
-      await bot.sendChatAction(chatId, "upload_photo");
-
-      const apiKey = process.env["SERPER_API_KEY"];
-      if (!apiKey) {
-        await bot.sendMessage(chatId, "Image search is not configured on this bot right now.");
-        return;
-      }
-
-      const response = await fetch("https://google.serper.dev/images", {
-        method: "POST",
-        headers: {
-          "X-API-KEY": apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ q: query }),
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Serper image search failed (${response.status}): ${body}`);
-      }
-
-      const data = (await response.json()) as { images?: Array<{ imageUrl?: string }> };
-      const images = (data.images ?? []).map((img) => img.imageUrl).filter(Boolean).slice(0, 3);
-
-      if (images.length === 0) {
-        await bot.sendMessage(chatId, "I couldn't find any images for that search.");
-        return;
-      }
-
-      for (const imageUrl of images) {
-        await bot.sendPhoto(chatId, imageUrl as string);
-      }
+      await handleImageSearch(chatId, bot, query);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Image search failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't search for images right now.");
+      await bot.sendMessage(chatId, "Sorry, I couldn't search for images right now. Please try again later.");
     }
   });
 
@@ -585,6 +591,19 @@ export async function startBot(): Promise<void> {
     await maybeSendSponsoredAd(bot, msg);
 
     if (msg.text.startsWith("/")) return;
+
+    const imageSearchQuery = extractImageSearchQuery(msg.text);
+    if (imageSearchQuery) {
+      try {
+        await handleImageSearch(chatId, bot, imageSearchQuery);
+        return;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error({ err: message }, "Natural-language image search failed");
+        await bot.sendMessage(chatId, "Sorry, I couldn't search for images right now. Please try again later.");
+        return;
+      }
+    }
 
     const imagePrompt = extractImageGenPrompt(msg.text);
     if (imagePrompt) {
