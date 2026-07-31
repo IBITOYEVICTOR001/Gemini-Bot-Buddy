@@ -19,7 +19,7 @@ import { runTavilySearch } from "./services/tavily";
 import { searchSerperImages } from "./services/serperImage";
 import { createVideoJob, pollVideoCompletion } from "./services/json2video";
 import { synthesizeSpeech, transcribeAudio } from "./services/hf";
-import { sendSponsoredAd } from "./services/adsgram";
+import { sendSponsoredSmartLink } from "./services/monetag";
 
 const MAX_HISTORY = 10;
 const FALLBACK_MESSAGE =
@@ -31,35 +31,8 @@ interface ConversationTurn {
 }
 
 const conversationHistory = new Map<number, ConversationTurn[]>();
-const userInteractionCounts = new Map<number, number>();
-
-async function maybeSendSponsoredAd(bot: TelegramBot, msg: Message): Promise<void> {
-  const userId = msg.from?.id;
-  if (!userId) {
-    console.log("[AdsGram] Skipping counter check: message has no Telegram user id.", { chatId: msg.chat.id });
-    return;
-  }
-
-  const previousCount = userInteractionCounts.get(userId) ?? 0;
-  const nextCount = previousCount + 1;
-  userInteractionCounts.set(userId, nextCount);
-
-  const shouldShowAd = nextCount % 4 === 0;
-  console.log("[AdsGram] Interaction counter checked.", {
-    chatId: msg.chat.id,
-    userId,
-    previousCount,
-    nextCount,
-    shouldShowAd,
-    storage: "in-memory; resets whenever the Node.js process restarts or Render redeploys",
-  });
-
-  if (!shouldShowAd) {
-    console.log("[AdsGram] Skipping ad fetch: interaction count is not divisible by 4.", { userId, nextCount });
-    return;
-  }
-
-  await sendSponsoredAd(bot, msg.chat.id, userId);
+async function maybeSendSponsoredMessage(bot: TelegramBot, msg: Message): Promise<void> {
+  await sendSponsoredSmartLink(bot, msg.chat.id);
 }
 
 function getHistory(chatId: number): ConversationTurn[] {
@@ -337,8 +310,6 @@ export async function startBot(): Promise<void> {
     return;
   }
 
-  console.log("[AdsGram] Interaction counters initialized in memory; counts start at 0 after process start/redeploy.");
-
   bot = new TelegramBot(token);
   await bot.setWebHook(`${webhookUrl}/api/telegram-webhook`);
   logger.info("[Bot] Telegram webhook set.");
@@ -540,28 +511,30 @@ export async function startBot(): Promise<void> {
     const chatId = msg.chat.id;
     try {
       await handleVoiceMessage(chatId, bot, msg);
-      await maybeSendSponsoredAd(bot, msg);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Voice transcription failed");
       await bot.sendMessage(chatId, "Sorry, I couldn't transcribe that voice message.");
+    } finally {
+      await maybeSendSponsoredMessage(bot, msg);
     }
   });
 
   bot.on("photo", async (msg) => {
     const chatId = msg.chat.id;
-    if (!process.env["OCR_SPACE_API_KEY"]) {
-      await bot.sendMessage(chatId, "OCR is not configured on this bot right now.");
-      return;
-    }
-
     try {
+      if (!process.env["OCR_SPACE_API_KEY"]) {
+        await bot.sendMessage(chatId, "OCR is not configured on this bot right now.");
+        return;
+      }
+
       await handlePhotoMessage(chatId, bot, msg);
-      await maybeSendSponsoredAd(bot, msg);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Photo OCR failed");
       await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+    } finally {
+      await maybeSendSponsoredMessage(bot, msg);
     }
   });
 
@@ -569,16 +542,17 @@ export async function startBot(): Promise<void> {
     const chatId = msg.chat.id;
     try {
       await handleDocumentMessage(chatId, bot, msg);
-      await maybeSendSponsoredAd(bot, msg);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Document processing failed");
       await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+    } finally {
+      await maybeSendSponsoredMessage(bot, msg);
     }
   });
 
   bot.on("message", async (msg) => {
-    console.log("[AdsGram] Main message handler received update.", {
+    console.log("[Bot] Main message handler received update.", {
       chatId: msg.chat.id,
       userId: msg.from?.id,
       hasText: Boolean(msg.text),
@@ -588,7 +562,7 @@ export async function startBot(): Promise<void> {
     if (!msg.text) return;
     const chatId = msg.chat.id;
 
-    await maybeSendSponsoredAd(bot, msg);
+    await maybeSendSponsoredMessage(bot, msg);
 
     if (msg.text.startsWith("/")) return;
 
