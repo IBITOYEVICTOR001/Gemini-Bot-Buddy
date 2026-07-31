@@ -18,6 +18,7 @@ import {
 import { runTavilySearch } from "./services/tavily";
 import { createVideoJob, pollVideoCompletion } from "./services/json2video";
 import { synthesizeSpeech, transcribeAudio } from "./services/hf";
+import { sendSponsoredAd } from "./services/adsgram";
 
 const MAX_HISTORY = 10;
 const FALLBACK_MESSAGE =
@@ -29,6 +30,36 @@ interface ConversationTurn {
 }
 
 const conversationHistory = new Map<number, ConversationTurn[]>();
+const userInteractionCounts = new Map<number, number>();
+
+async function maybeSendSponsoredAd(bot: TelegramBot, msg: Message): Promise<void> {
+  const userId = msg.from?.id;
+  if (!userId) {
+    console.log("[AdsGram] Skipping counter check: message has no Telegram user id.", { chatId: msg.chat.id });
+    return;
+  }
+
+  const previousCount = userInteractionCounts.get(userId) ?? 0;
+  const nextCount = previousCount + 1;
+  userInteractionCounts.set(userId, nextCount);
+
+  const shouldShowAd = nextCount % 4 === 0;
+  console.log("[AdsGram] Interaction counter checked.", {
+    chatId: msg.chat.id,
+    userId,
+    previousCount,
+    nextCount,
+    shouldShowAd,
+    storage: "in-memory; resets whenever the Node.js process restarts or Render redeploys",
+  });
+
+  if (!shouldShowAd) {
+    console.log("[AdsGram] Skipping ad fetch: interaction count is not divisible by 4.", { userId, nextCount });
+    return;
+  }
+
+  await sendSponsoredAd(bot, msg.chat.id, userId);
+}
 
 function getHistory(chatId: number): ConversationTurn[] {
   if (!conversationHistory.has(chatId)) {
@@ -268,6 +299,8 @@ export async function startBot(): Promise<void> {
     return;
   }
 
+  console.log("[AdsGram] Interaction counters initialized in memory; counts start at 0 after process start/redeploy.");
+
   bot = new TelegramBot(token);
   await bot.setWebHook(`${webhookUrl}/api/telegram-webhook`);
   logger.info("[Bot] Telegram webhook set.");
@@ -501,6 +534,7 @@ export async function startBot(): Promise<void> {
     const chatId = msg.chat.id;
     try {
       await handleVoiceMessage(chatId, bot, msg);
+      await maybeSendSponsoredAd(bot, msg);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Voice transcription failed");
@@ -517,6 +551,7 @@ export async function startBot(): Promise<void> {
 
     try {
       await handlePhotoMessage(chatId, bot, msg);
+      await maybeSendSponsoredAd(bot, msg);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Photo OCR failed");
@@ -528,6 +563,7 @@ export async function startBot(): Promise<void> {
     const chatId = msg.chat.id;
     try {
       await handleDocumentMessage(chatId, bot, msg);
+      await maybeSendSponsoredAd(bot, msg);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Document processing failed");
@@ -536,8 +572,17 @@ export async function startBot(): Promise<void> {
   });
 
   bot.on("message", async (msg) => {
+    console.log("[AdsGram] Main message handler received update.", {
+      chatId: msg.chat.id,
+      userId: msg.from?.id,
+      hasText: Boolean(msg.text),
+      textPreview: msg.text?.slice(0, 50),
+    });
+
     if (!msg.text) return;
     const chatId = msg.chat.id;
+
+    await maybeSendSponsoredAd(bot, msg);
 
     if (msg.text.startsWith("/")) return;
 
