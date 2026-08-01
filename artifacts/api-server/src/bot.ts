@@ -25,6 +25,52 @@ import { sendSponsoredSmartLink } from "./services/monetag";
 const MAX_HISTORY = 10;
 const FALLBACK_MESSAGE =
   "LADEX IS NOT AVAILABLE AT THE MOMENT PLS TRY AGAIN LATER";
+const TELEGRAM_CAPTION_LIMIT = 1024;
+
+function fitTelegramCaption(text: string): string {
+  if (text.length <= TELEGRAM_CAPTION_LIMIT) return text;
+  return `${text.slice(0, TELEGRAM_CAPTION_LIMIT - 1)}…`;
+}
+
+function buildSearchFallbackMessage(query: string, resultUrl?: string): string {
+  const link = resultUrl?.trim() || `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+  return `I'm sorry — I couldn't generate a full AI response right now. This link may still help with your question:\n${link}`;
+}
+
+function formatTavilyFallback(results: { title: string; url: string; content: string }[]): string {
+  const usefulResults = results.filter((result) => result.title || result.content || result.url).slice(0, 3);
+  return [
+    "I couldn't reach my main chat model, but I found these web results that may help:",
+    ...usefulResults.map((result, index) => {
+      const title = result.title || "Search result";
+      const content = result.content ? `\n${result.content}` : "";
+      const url = result.url ? `\n${result.url}` : "";
+      return `${index + 1}. ${title}${content}${url}`;
+    }),
+  ].join("\n\n");
+}
+
+async function sendMainChatFailureFallback(bot: TelegramBot, chatId: number, query: string): Promise<void> {
+  logger.info({ chatId }, "Chat fallback: trying Tavily after Groq failure");
+  let results: { title: string; url: string; content: string }[] = [];
+
+  try {
+    results = await runTavilySearch(query);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn({ err: message, chatId }, "Chat fallback: Tavily threw an error");
+  }
+
+  if (results.some((result) => result.title || result.content || result.url)) {
+    logger.info({ chatId, resultCount: results.length }, "Chat fallback: sending Tavily results");
+    await sendTextMessage(bot, chatId, formatTavilyFallback(results));
+    return;
+  }
+
+  const linkResult = results.find((result) => result.url);
+  logger.warn({ chatId }, "Chat fallback: Tavily returned no useful results; sending apology link");
+  await sendTextMessage(bot, chatId, buildSearchFallbackMessage(query, linkResult?.url));
+}
 
 interface ConversationTurn {
   role: "user" | "assistant";
@@ -95,10 +141,21 @@ async function handleImageSearch(chatId: number, bot: TelegramBot, query: string
     return;
   }
 
+  let sentCount = 0;
   for (const image of images) {
-    await bot.sendPhoto(chatId, image.imageUrl, {
-      caption: image.sourceUrl ? `${image.title}\n${image.sourceUrl}` : image.title,
-    });
+    try {
+      await bot.sendPhoto(chatId, image.imageUrl, {
+        caption: fitTelegramCaption(image.sourceUrl ? `${image.title}\n${image.sourceUrl}` : image.title),
+      });
+      sentCount += 1;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn({ err: message, imageUrl: image.imageUrl }, "Skipping image result because Telegram could not send it");
+    }
+  }
+
+  if (sentCount === 0) {
+    await sendTextMessage(bot, chatId, "I found image results, but couldn't send them through Telegram right now.");
   }
 }
 
@@ -191,7 +248,7 @@ async function runOcr(imageBuffer: Buffer): Promise<string> {
   formData.append("isOverlayRequired", "false");
   formData.append("detectOrientation", "true");
   formData.append("scale", "true");
-  formData.append("file", new Blob([imageBuffer], { type: "image/jpeg" }), "image.jpg");
+  formData.append("file", new Blob([new Uint8Array(imageBuffer)], { type: "image/jpeg" }), "image.jpg");
 
   const res = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
@@ -582,7 +639,7 @@ export async function startBot(): Promise<void> {
           `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}`,
           { responseType: "stream", timeout: 15000 },
         );
-        await bot.sendPhoto(chatId, response.data, { caption: "Here is your image." });
+        await bot.sendPhoto(chatId, response.data, { caption: fitTelegramCaption("Here is your image.") });
         return;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -595,8 +652,8 @@ export async function startBot(): Promise<void> {
       await sendTextMessage(bot, chatId, reply);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error({ err: message }, "Chat response failed");
-      await sendTextMessage(bot, chatId, FALLBACK_MESSAGE);
+      logger.error({ err: message, chatId }, "Chat response failed; entering Groq -> Tavily fallback chain");
+      await sendMainChatFailureFallback(bot, chatId, msg.text);
     }
   });
 

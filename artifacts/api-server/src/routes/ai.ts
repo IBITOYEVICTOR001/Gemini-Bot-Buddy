@@ -124,7 +124,9 @@ router.post("/gemini/analyze", async (req, res) => {
   }
 
   try {
-    const analysis = await analyzeDataset(data, question);
+    const analysis = await analyzeDataset(`${question}
+
+${JSON.stringify(data)}`);
     return res.json({ analysis });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -202,16 +204,13 @@ router.post("/video", async (req, res) => {
   }
 
   try {
-    const job = await createVideoJob(
-      prompt,
-      orientation ?? "horizontal",
-      durationSeconds ?? 20,
-    );
-    const completion = await pollVideoCompletion(job.jobId, {
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`;
+    const job = await createVideoJob(prompt, imageUrl, orientation ?? "horizontal");
+    const completion = await pollVideoCompletion(job.projectId, {
       intervalMs: 5000,
-      maxAttempts: 20,
+      maxAttempts: durationSeconds ? Math.max(1, Math.ceil(durationSeconds / 5)) : 20,
     });
-    return res.json({ jobId: job.jobId, downloadUrl: completion.downloadUrl });
+    return res.json({ jobId: job.projectId, downloadUrl: completion.downloadUrl });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ error: message });
