@@ -90,12 +90,12 @@ export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
           .join(" ")
           .trim();
       } else if (json && typeof json === "object") {
-        // @ts-ignore
+        const record = json as Record<string, unknown>;
         text =
-          typeof json.text === "string"
-            ? json.text
-            : typeof json.transcription === "string"
-            ? json.transcription
+          typeof record["text"] === "string"
+            ? record["text"]
+            : typeof record["transcription"] === "string"
+            ? record["transcription"]
             : "";
       } else {
         throw new Error("Unexpected Hugging Face transcription response.");
