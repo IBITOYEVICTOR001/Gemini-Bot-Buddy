@@ -1,5 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { logger } from "../lib/logger";
+import { sendTextMessage } from "../lib/telegramMessages";
 
 const ADSGRAM_ENDPOINT = "https://api.adsgram.ai/advbot";
 const ADSGRAM_BLOCK_ID = "40636";
@@ -136,7 +137,7 @@ export async function sendSponsoredAd(bot: TelegramBot, chatId: number, userId: 
       return;
     }
 
-    await bot.sendMessage(chatId, sponsoredText, {
+    await sendTextMessage(bot, chatId, sponsoredText, {
       parse_mode: "HTML",
       reply_markup: replyMarkup,
     });
