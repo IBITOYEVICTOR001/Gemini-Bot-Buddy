@@ -1,5 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 import { logger } from "../lib/logger";
+import { sendTextMessage } from "../lib/telegramMessages";
 
 const SPONSORED_MESSAGE = "📢 Sponsored: Check this out";
 
@@ -42,7 +43,7 @@ export async function sendSponsoredSmartLink(
   }
 
   try {
-    await bot.sendMessage(chatId, SPONSORED_MESSAGE, {
+    await sendTextMessage(bot, chatId, SPONSORED_MESSAGE, {
       reply_markup: {
         inline_keyboard: [
           [

@@ -5,6 +5,7 @@ import type { Message } from "node-telegram-bot-api";
 import axios from "axios";
 import { PDFParse } from "pdf-parse";
 import { logger } from "./lib/logger";
+import { sendTextMessage } from "./lib/telegramMessages";
 import {
   analyzeDataset,
   decideSearch,
@@ -84,13 +85,13 @@ async function handleImageSearch(chatId: number, bot: TelegramBot, query: string
   await bot.sendChatAction(chatId, "upload_photo");
 
   if (!process.env["SERPER_API_KEY"]) {
-    await bot.sendMessage(chatId, "Image search is not configured on this bot right now. Please add SERPER_API_KEY.");
+    await sendTextMessage(bot, chatId, "Image search is not configured on this bot right now. Please add SERPER_API_KEY.");
     return;
   }
 
   const images = await searchSerperImages(query, 3);
   if (images.length === 0) {
-    await bot.sendMessage(chatId, "I couldn't find any images for that search.");
+    await sendTextMessage(bot, chatId, "I couldn't find any images for that search.");
     return;
   }
 
@@ -131,14 +132,15 @@ async function handleVideoGen(
   const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`;
   const job = await createVideoJob(prompt, imageUrl, orientation);
 
-  await bot.sendMessage(
+  await sendTextMessage(
+    bot,
     chatId,
     `Your video job has been created (project ID: ${job.projectId}). Checking status until it finishes. This may take a minute or two.`,
   );
 
   const completion = await pollVideoCompletion(job.projectId);
 
-  await bot.sendMessage(chatId, `Your video is ready! Download it here:\n${completion.downloadUrl}`);
+  await sendTextMessage(bot, chatId, `Your video is ready! Download it here:\n${completion.downloadUrl}`);
 }
 
 async function handleVoiceMessage(chatId: number, bot: TelegramBot, msg: Message): Promise<void> {
@@ -160,7 +162,7 @@ async function handleVoiceMessage(chatId: number, bot: TelegramBot, msg: Message
   const transcript = await transcribeAudio(buffer);
   logger.info({ chatId }, "Transcription complete");
 
-  await bot.sendMessage(chatId, `📝 Transcription:\n${transcript}`);
+  await sendTextMessage(bot, chatId, `📝 Transcription:\n${transcript}`);
 }
 
 async function handleTextToSpeech(chatId: number, bot: TelegramBot, text: string): Promise<void> {
@@ -225,15 +227,15 @@ async function handlePhotoMessage(chatId: number, bot: TelegramBot, msg: Message
   const buffer = await downloadTelegramFile(bot, fileId);
   const extractedText = await runOcr(buffer);
   if (!extractedText) {
-    await bot.sendMessage(chatId, "I could not extract readable text from the image.");
+    await sendTextMessage(bot, chatId, "I could not extract readable text from the image.");
     return;
   }
 
   if (caption) {
     const translation = await generateTranslation(extractedText, "English");
-    await bot.sendMessage(chatId, `📄 Extracted text:\n${extractedText}\n\nTranslation to English:\n${translation}`);
+    await sendTextMessage(bot, chatId, `📄 Extracted text:\n${extractedText}\n\nTranslation to English:\n${translation}`);
   } else {
-    await bot.sendMessage(chatId, `📄 Extracted text:\n${extractedText}`);
+    await sendTextMessage(bot, chatId, `📄 Extracted text:\n${extractedText}`);
   }
 }
 
@@ -249,13 +251,6 @@ async function runPdfExtract(buffer: Buffer): Promise<{ text: string; pages: num
   }
 }
 
-async function sendLongMessage(bot: TelegramBot, chatId: number, text: string): Promise<void> {
-  const maxChunk = 4000;
-  for (let offset = 0, part = 1; offset < text.length; offset += maxChunk, part += 1) {
-    await bot.sendMessage(chatId, `[Part ${part}]\n${text.slice(offset, offset + maxChunk)}`);
-  }
-}
-
 async function handleDocumentMessage(chatId: number, bot: TelegramBot, msg: Message): Promise<void> {
   const doc = msg.document;
   if (!doc) return;
@@ -264,22 +259,22 @@ async function handleDocumentMessage(chatId: number, bot: TelegramBot, msg: Mess
   const caption = msg.caption?.trim() ?? "";
 
   if (!doc.mime_type?.includes("pdf") && !fileName.toLowerCase().endsWith(".pdf")) {
-    await bot.sendMessage(chatId, "I can only process PDF documents right now.");
+    await sendTextMessage(bot, chatId, "I can only process PDF documents right now.");
     return;
   }
 
   const buffer = await downloadTelegramFile(bot, doc.file_id);
   const extracted = await runPdfExtract(buffer);
   if (!extracted.text) {
-    await bot.sendMessage(chatId, "I could not extract readable text from that PDF.");
+    await sendTextMessage(bot, chatId, "I could not extract readable text from that PDF.");
     return;
   }
 
   if (caption) {
     const analysis = await generateConversationReply(caption, [], []);
-    await sendLongMessage(bot, chatId, `📄 Extracted text from ${fileName}:\n${extracted.text}\n\nAI analysis:\n${analysis}`);
+    await sendTextMessage(bot, chatId, `📄 Extracted text from ${fileName}:\n${extracted.text}\n\nAI analysis:\n${analysis}`);
   } else {
-    await sendLongMessage(bot, chatId, `📄 Summary request for ${fileName}:\n${extracted.text}`);
+    await sendTextMessage(bot, chatId, `📄 Summary request for ${fileName}:\n${extracted.text}`);
   }
 }
 
@@ -320,7 +315,7 @@ export async function startBot(): Promise<void> {
     const orientation = (match?.[1] ? match[1].toLowerCase() : "horizontal") as "horizontal" | "vertical";
     const prompt = match?.[2]?.trim();
     if (!prompt) {
-      await bot.sendMessage(chatId, "Usage: /video [horizontal|vertical] your prompt");
+      await sendTextMessage(bot, chatId, "Usage: /video [horizontal|vertical] your prompt");
       return;
     }
 
@@ -329,7 +324,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Video generation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't generate that video right now.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't generate that video right now.");
     }
   });
 
@@ -341,7 +336,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Text-to-speech failed");
-      await bot.sendMessage(chatId, "Sorry, I could not generate audio right now.");
+      await sendTextMessage(bot, chatId, "Sorry, I could not generate audio right now.");
     }
   });
 
@@ -352,11 +347,11 @@ export async function startBot(): Promise<void> {
     const text = match[2];
     try {
       const translation = await generateTranslation(text, targetLanguage);
-      await bot.sendMessage(chatId, `Translation (${targetLanguage}):\n${translation}`);
+      await sendTextMessage(bot, chatId, `Translation (${targetLanguage}):\n${translation}`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Translation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't translate that text.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't translate that text.");
     }
   });
 
@@ -368,11 +363,11 @@ export async function startBot(): Promise<void> {
     try {
       const type = command === "project" ? "projectIdeas" : (command as "story" | "poem" | "dialogue");
       const output = await generateCreativeOutput(type, topic);
-      await bot.sendMessage(chatId, output);
+      await sendTextMessage(bot, chatId, output);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Creative output failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't generate that creative output.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't generate that creative output.");
     }
   });
 
@@ -383,11 +378,11 @@ export async function startBot(): Promise<void> {
     const subject = match[2];
     try {
       const game = await generateGame(gameType, subject);
-      await bot.sendMessage(chatId, game);
+      await sendTextMessage(bot, chatId, game);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Game generation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't start that game.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't start that game.");
     }
   });
 
@@ -396,11 +391,11 @@ export async function startBot(): Promise<void> {
     const chatId = msg.chat.id;
     try {
       const code = await generateCodeSnippet(match[1], "JavaScript");
-      await bot.sendMessage(chatId, code);
+      await sendTextMessage(bot, chatId, code);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Code generation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't generate code for that request.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't generate code for that request.");
     }
   });
 
@@ -413,7 +408,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "PDF generation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't create that PDF right now.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't create that PDF right now.");
     }
   });
 
@@ -429,7 +424,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "DOCX generation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't create that Word document right now.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't create that Word document right now.");
     }
   });
 
@@ -446,7 +441,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Excel generation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't create that spreadsheet right now.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't create that spreadsheet right now.");
     }
   });
 
@@ -463,7 +458,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "PowerPoint generation failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't create that presentation right now.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't create that presentation right now.");
     }
   });
 
@@ -477,7 +472,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Image search failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't search for images right now. Please try again later.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't search for images right now. Please try again later.");
     }
   });
 
@@ -491,7 +486,7 @@ export async function startBot(): Promise<void> {
       const results = await searchYoutubeVideos(query, 5);
 
       if (results.length === 0) {
-        await bot.sendMessage(chatId, "I couldn't find any videos for that search.");
+        await sendTextMessage(bot, chatId, "I couldn't find any videos for that search.");
         return;
       }
 
@@ -499,11 +494,11 @@ export async function startBot(): Promise<void> {
         .map((video, i) => `${i + 1}. ${video.title} — ${video.channelTitle}\n${video.url}`)
         .join("\n\n");
 
-      await bot.sendMessage(chatId, reply);
+      await sendTextMessage(bot, chatId, reply);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "YouTube search failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't search YouTube right now.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't search YouTube right now.");
     }
   });
 
@@ -514,7 +509,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Voice transcription failed");
-      await bot.sendMessage(chatId, "Sorry, I couldn't transcribe that voice message.");
+      await sendTextMessage(bot, chatId, "Sorry, I couldn't transcribe that voice message.");
     } finally {
       await maybeSendSponsoredMessage(bot, msg);
     }
@@ -524,7 +519,7 @@ export async function startBot(): Promise<void> {
     const chatId = msg.chat.id;
     try {
       if (!process.env["OCR_SPACE_API_KEY"]) {
-        await bot.sendMessage(chatId, "OCR is not configured on this bot right now.");
+        await sendTextMessage(bot, chatId, "OCR is not configured on this bot right now.");
         return;
       }
 
@@ -532,7 +527,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Photo OCR failed");
-      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+      await sendTextMessage(bot, chatId, FALLBACK_MESSAGE);
     } finally {
       await maybeSendSponsoredMessage(bot, msg);
     }
@@ -545,7 +540,7 @@ export async function startBot(): Promise<void> {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Document processing failed");
-      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+      await sendTextMessage(bot, chatId, FALLBACK_MESSAGE);
     } finally {
       await maybeSendSponsoredMessage(bot, msg);
     }
@@ -574,7 +569,7 @@ export async function startBot(): Promise<void> {
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         logger.error({ err: message }, "Natural-language image search failed");
-        await bot.sendMessage(chatId, "Sorry, I couldn't search for images right now. Please try again later.");
+        await sendTextMessage(bot, chatId, "Sorry, I couldn't search for images right now. Please try again later.");
         return;
       }
     }
@@ -597,11 +592,11 @@ export async function startBot(): Promise<void> {
 
     try {
       const reply = await handleUserMessage(chatId, msg.text);
-      await bot.sendMessage(chatId, reply);
+      await sendTextMessage(bot, chatId, reply);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err: message }, "Chat response failed");
-      await bot.sendMessage(chatId, FALLBACK_MESSAGE);
+      await sendTextMessage(bot, chatId, FALLBACK_MESSAGE);
     }
   });
 
