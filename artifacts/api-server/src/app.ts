@@ -4,8 +4,12 @@ import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
 import { getBot } from "./bot";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const app: Express = express();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.use(
   pinoHttp({
@@ -29,12 +33,9 @@ app.use(
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
 app.post("/api/telegram-webhook", (req, res) => {
   getBot().processUpdate(req.body);
   res.sendStatus(200);
 });
-
 app.use("/api", router);
-
 export default app;
