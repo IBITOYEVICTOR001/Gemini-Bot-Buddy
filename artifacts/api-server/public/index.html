@@ -653,6 +653,18 @@
     return 'Generating your video now (job: ' + escapeHtml(data.jobId || 'pending') + ') — this can take a minute or two. Check back shortly.';
   }
 
+  const SPONSORED_LINKS = [
+    { name: 'Monetag', url: 'https://omg10.com/4/11472257' },
+    { name: 'Adsterra', url: 'https://www.effectivecpmnetwork.com/hcd9xrzuwy?key=be02fba48fdcbe1519df705aba78d72e' }
+  ];
+
+  function addSponsoredMessage() {
+    const pick = SPONSORED_LINKS[Math.floor(Math.random() * SPONSORED_LINKS.length)];
+    const html = '📢 <strong>Sponsored</strong><br>' +
+      '<a href="' + pick.url + '" target="_blank" rel="noopener sponsored" class="file-chip">Learn more</a>';
+    addMessage('bot', html);
+  }
+
   async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
@@ -669,6 +681,7 @@
       else html = await callChat(text);
       typingRow.remove();
       addMessage('bot', html);
+      addSponsoredMessage();
     } catch (err) {
       typingRow.remove();
       addMessage('bot', 'Sorry, something went wrong: ' + escapeHtml(err.message || 'please try again.'));
