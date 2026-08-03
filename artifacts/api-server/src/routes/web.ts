@@ -19,8 +19,50 @@ const router = Router();
 const WINDOW_MS = 60_000;
 const MAX_REQUESTS_PER_WINDOW = Number(process.env["WEB_API_RATE_LIMIT_PER_MINUTE"] ?? 30);
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+const SESSION_COOKIE_NAME = "ladex_session";
 
 type DocumentType = "pdf" | "docx" | "pptx" | "xlsx";
+
+type GoogleUser = {
+  id: string;
+  email: string;
+  name: string;
+  picture: string;
+};
+
+function getGoogleClientId(): string {
+  return process.env["GOOGLE_CLIENT_ID"]?.trim() ?? "";
+}
+
+async function upsertUser(user: GoogleUser): Promise<void> {
+  if (!process.env["DATABASE_URL"]) {
+    logger.warn("DATABASE_URL is not set; skipping Google user persistence");
+    return;
+  }
+
+  const [{ db, usersTable }] = await Promise.all([import("@workspace/db")]);
+  await db
+    .insert(usersTable)
+    .values({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      picture: user.picture,
+    })
+    .onConflictDoUpdate({
+      target: usersTable.id,
+      set: {
+        email: user.email,
+        name: user.name,
+        picture: user.picture,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+function encodeSessionCookie(user: GoogleUser): string {
+  return Buffer.from(JSON.stringify({ id: user.id, email: user.email, name: user.name }), "utf8").toString("base64url");
+}
 
 type ApiError = {
   status: number;
@@ -166,6 +208,55 @@ function getDocumentBuffer(prompt: string, type: DocumentType): Promise<{ buffer
 }
 
 router.use(rateLimit);
+
+router.get("/config", (_req, res) => {
+  return res.json({ googleClientId: getGoogleClientId() });
+});
+
+router.post("/auth/google", async (req, res) => {
+  try {
+    const credential = requireString(req.body?.credential, "credential");
+    const googleClientId = getGoogleClientId();
+
+    if (!googleClientId) {
+      return res.status(500).json({ error: "Google sign-in is not configured." });
+    }
+
+    const { OAuth2Client } = await import("google-auth-library");
+    const googleOAuthClient = new OAuth2Client();
+    const ticket = await googleOAuthClient.verifyIdToken({
+      idToken: credential,
+      audience: googleClientId,
+    });
+    const payload = ticket.getPayload();
+
+    if (!payload?.sub || !payload.email) {
+      return res.status(401).json({ error: "Google sign-in did not return a valid user profile." });
+    }
+
+    const user: GoogleUser = {
+      id: payload.sub,
+      email: payload.email,
+      name: payload.name ?? payload.email,
+      picture: payload.picture ?? "",
+    };
+
+    await upsertUser(user);
+
+    res.cookie(SESSION_COOKIE_NAME, encodeSessionCookie(user), {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      maxAge: 1000 * 60 * 60 * 24 * 30,
+      path: "/",
+    });
+
+    return res.json({ user });
+  } catch (error: unknown) {
+    logger.warn({ err: getErrorMessage(error) }, "Google sign-in failed");
+    return res.status(401).json({ error: "Invalid Google sign-in credential." });
+  }
+});
 
 router.post("/chat", async (req, res) => {
   try {
