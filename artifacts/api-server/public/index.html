@@ -168,6 +168,42 @@
 
   .mode-icon { width: 17px; height: 17px; flex-shrink: 0; }
 
+  .recents-section {
+    min-height: 0;
+    margin-bottom: 20px;
+    overflow: hidden;
+  }
+
+  .recents-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 30vh;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .recent-item {
+    display: block;
+    width: 100%;
+    border: none;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1.3;
+    overflow: hidden;
+    padding: 8px 10px;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-item:hover { background: #ececf1; }
+  .recent-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .recents-empty { color: var(--text-secondary); font-size: 12px; padding: 8px 10px; }
+
   .sidebar-footer {
     margin-top: auto;
     padding: 10px;
@@ -487,6 +523,11 @@
       </button>
     </div>
 
+    <div class="recents-section" aria-label="Recent chats">
+      <div class="mode-label">Recents</div>
+      <div class="recents-list" id="recentsList"></div>
+    </div>
+
     <div class="sidebar-footer">
       <div class="auth-status">
         <div id="g_id_signin"></div>
@@ -581,6 +622,7 @@
   const activeModeText = document.getElementById('activeModeText');
   const clearModeBtn = document.getElementById('clearModeBtn');
   const newChatBtn = document.getElementById('newChatBtn');
+  const recentsList = document.getElementById('recentsList');
   const googleSignIn = document.getElementById('g_id_signin');
   const googleSignInError = document.getElementById('googleSignInError');
   const signedInUser = document.getElementById('signedInUser');
@@ -626,10 +668,7 @@
   overlay.addEventListener('click', closeSidebarMobile);
 
   newChatBtn.addEventListener('click', () => {
-    chatInner.innerHTML = '';
-    chatHistory = [];
-    saveChatHistory();
-    emptyState.style.display = 'block';
+    createNewConversation();
     setMode('chat');
     closeSidebarMobile();
   });
@@ -671,29 +710,158 @@
   const API_BASE = '/api/web';
   const USER_STORAGE_KEY = 'ladexUser';
   const CHAT_HISTORY_STORAGE_KEY = 'ladexChatHistory';
+  const MAX_MESSAGES_PER_CONVERSATION = 50;
+  const UNTITLED_CONVERSATION_LABEL = 'New chat';
   let currentUser = null;
   let googleSignInInitStarted = false;
-  let chatHistory = loadChatHistory();
+  let chatStore = loadChatStore();
+  let chatHistory = getActiveConversation().messages;
 
 
-  function loadChatHistory() {
+  function generateConversationId() {
+    if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+    return 'chat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  }
+
+  function sanitizeMessages(messages) {
+    if (!Array.isArray(messages)) return [];
+    return messages
+      .filter(item => item && (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string')
+      .slice(-MAX_MESSAGES_PER_CONVERSATION);
+  }
+
+  function makeConversation(messages = []) {
+    const now = new Date().toISOString();
+    const conversation = {
+      id: generateConversationId(),
+      title: '',
+      messages: sanitizeMessages(messages),
+      updatedAt: now
+    };
+    conversation.title = getConversationTitle(conversation);
+    return conversation;
+  }
+
+  function normalizeChatStore(raw) {
+    const conversations = {};
+    let activeConversationId = raw?.activeConversationId;
+    Object.values(raw?.conversations || {}).forEach(item => {
+      if (!item || typeof item !== 'object') return;
+      const id = typeof item.id === 'string' && item.id ? item.id : generateConversationId();
+      const conversation = {
+        id,
+        title: typeof item.title === 'string' ? item.title : '',
+        messages: sanitizeMessages(item.messages),
+        updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : new Date().toISOString()
+      };
+      conversations[id] = conversation;
+    });
+    if (!Object.keys(conversations).length) {
+      const conversation = makeConversation();
+      conversations[conversation.id] = conversation;
+      activeConversationId = conversation.id;
+    }
+    if (!conversations[activeConversationId]) {
+      activeConversationId = Object.values(conversations).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0].id;
+    }
+    return { conversations, activeConversationId };
+  }
+
+  function loadChatStore() {
     try {
-      const saved = JSON.parse(localStorage.getItem(CHAT_HISTORY_STORAGE_KEY) || '[]');
-      if (!Array.isArray(saved)) return [];
-      return saved.filter(item => item && (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string');
+      const saved = JSON.parse(localStorage.getItem(CHAT_HISTORY_STORAGE_KEY) || 'null');
+      if (Array.isArray(saved)) return normalizeChatStore({ conversations: { legacy: { id: 'legacy', messages: saved, updatedAt: new Date().toISOString() } }, activeConversationId: 'legacy' });
+      return normalizeChatStore(saved || {});
     } catch (_err) {
-      return [];
+      return normalizeChatStore({});
     }
   }
 
-  function saveChatHistory() {
-    chatHistory = chatHistory.slice(-50);
-    localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(chatHistory));
+  function saveChatStore() {
+    localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(chatStore));
+  }
+
+  function getActiveConversation() {
+    return chatStore.conversations[chatStore.activeConversationId];
+  }
+
+  function truncateTitle(text, maxLength = 34) {
+    const clean = text.replace(/\s+/g, ' ').trim();
+    if (clean.length <= maxLength) return clean;
+    return clean.slice(0, maxLength - 1).trimEnd() + '…';
+  }
+
+  function getConversationTitle(conversation) {
+    if (conversation.title) return conversation.title;
+    const firstUserMessage = conversation.messages.find(message => message.role === 'user');
+    return firstUserMessage ? truncateTitle(firstUserMessage.content) : '';
+  }
+
+  function renderRecents() {
+    const conversations = Object.values(chatStore.conversations)
+      .filter(conversation => conversation.messages.length || conversation.id === chatStore.activeConversationId)
+      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    recentsList.innerHTML = '';
+    if (!conversations.length) {
+      recentsList.innerHTML = '<div class="recents-empty">No recent chats yet</div>';
+      return;
+    }
+    conversations.forEach(conversation => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'recent-item' + (conversation.id === chatStore.activeConversationId ? ' active' : '');
+      button.textContent = getConversationTitle(conversation) || UNTITLED_CONVERSATION_LABEL;
+      button.title = button.textContent;
+      button.addEventListener('click', () => switchConversation(conversation.id));
+      recentsList.appendChild(button);
+    });
+  }
+
+  function saveActiveConversation() {
+    const conversation = getActiveConversation();
+    conversation.messages = chatHistory.slice(-MAX_MESSAGES_PER_CONVERSATION);
+    conversation.title = getConversationTitle(conversation);
+    conversation.updatedAt = new Date().toISOString();
+    saveChatStore();
+    renderRecents();
   }
 
   function pushChatHistory(message) {
     chatHistory.push(message);
-    saveChatHistory();
+    saveActiveConversation();
+  }
+
+  function clearChatWindow() {
+    chatInner.innerHTML = '';
+    emptyState.style.display = 'block';
+  }
+
+  function replayConversation(conversation) {
+    clearChatWindow();
+    conversation.messages.forEach((message) => {
+      addMessage(message.role === 'assistant' ? 'bot' : 'user', escapeHtml(message.content).replace(/\n/g, '<br>'));
+    });
+  }
+
+  function switchConversation(id) {
+    if (!chatStore.conversations[id]) return;
+    chatStore.activeConversationId = id;
+    chatHistory = chatStore.conversations[id].messages;
+    saveChatStore();
+    replayConversation(chatStore.conversations[id]);
+    renderRecents();
+    setMode('chat');
+    closeSidebarMobile();
+  }
+
+  function createNewConversation() {
+    const conversation = makeConversation();
+    chatStore.conversations[conversation.id] = conversation;
+    chatStore.activeConversationId = conversation.id;
+    chatHistory = conversation.messages;
+    saveChatStore();
+    clearChatWindow();
+    renderRecents();
   }
 
   function showGoogleSignInError(message) {
@@ -807,9 +975,8 @@
   }
 
   function restoreHistory() {
-    chatHistory.forEach((message) => {
-      addMessage(message.role === 'assistant' ? 'bot' : 'user', escapeHtml(message.content).replace(/\n/g, '<br>'));
-    });
+    replayConversation(getActiveConversation());
+    renderRecents();
   }
 
   window.addEventListener('DOMContentLoaded', restoreHistory);
