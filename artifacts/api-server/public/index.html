@@ -651,7 +651,13 @@
   }
 
   function saveChatHistory() {
-    localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(chatHistory.slice(-50)));
+    chatHistory = chatHistory.slice(-50);
+    localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(chatHistory));
+  }
+
+  function pushChatHistory(message) {
+    chatHistory.push(message);
+    saveChatHistory();
   }
 
   function renderAuthState(user) {
@@ -727,13 +733,13 @@
     return div.innerHTML;
   }
 
-  function renderSavedChatHistory() {
+  function restoreHistory() {
     chatHistory.forEach((message) => {
       addMessage(message.role === 'assistant' ? 'bot' : 'user', escapeHtml(message.content).replace(/\n/g, '<br>'));
     });
   }
 
-  renderSavedChatHistory();
+  window.addEventListener('DOMContentLoaded', restoreHistory);
 
   async function callChat(text) {
     const res = await fetch(API_BASE + '/chat', {
@@ -743,9 +749,7 @@
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Chat request failed');
-    chatHistory.push({ role: 'user', content: text });
-    chatHistory.push({ role: 'assistant', content: data.reply });
-    saveChatHistory();
+    pushChatHistory({ role: 'assistant', content: data.reply });
     return escapeHtml(data.reply).replace(/\n/g, '<br>');
   }
 
@@ -810,6 +814,7 @@
     const text = input.value.trim();
     if (!text) return;
     addMessage('user', escapeHtml(text));
+    if (currentMode === 'chat') pushChatHistory({ role: 'user', content: text });
     input.value = '';
     autoGrow();
 
