@@ -17,11 +17,47 @@
     --accent: #5b5ff0;
     --accent-soft: #eeeeff;
     --accent-hover: #4b4fe0;
+    --accent-gradient-end: #8b8ef8;
     --bubble-user: #f2f2f7;
     --bubble-bot: #ffffff;
+    --control-bg: var(--bubble-bot);
+    --hover-bg: #ececf1;
+    --disabled-bg: #d8d8e0;
+    --danger-bg: #fff5f5;
+    --danger-border: #f0c8c8;
+    --danger-text: #9f1d1d;
+    --on-accent: #ffffff;
+    --overlay-bg: rgba(0, 0, 0, 0.25);
     --radius: 14px;
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'IBM Plex Mono', monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1018;
+      --sidebar-bg: #171924;
+      --panel-border: #2a2d3a;
+      --text-primary: #f4f5fb;
+      --text-secondary: #a7abb8;
+      --accent: #8b8ef8;
+      --accent-soft: #242548;
+      --accent-hover: #a5a7ff;
+      --accent-gradient-end: #a5a7ff;
+      --bubble-user: #252735;
+      --bubble-bot: #181a24;
+      --control-bg: var(--bubble-bot);
+      --hover-bg: #232633;
+      --disabled-bg: #3a3d4b;
+      --danger-bg: #351b22;
+      --danger-border: #74313f;
+      --danger-text: #ffb4c0;
+      --on-accent: #ffffff;
+      --overlay-bg: rgba(0, 0, 0, 0.45);
+      --radius: 14px;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'IBM Plex Mono', monospace;
+    }
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -62,11 +98,11 @@
     width: 30px;
     height: 30px;
     border-radius: 9px;
-    background: linear-gradient(135deg, var(--accent), #8b8ef8);
+    background: linear-gradient(135deg, var(--accent), var(--accent-gradient-end));
     display: flex;
     align-items: center;
     justify-content: center;
-    color: white;
+    color: var(--on-accent);
     font-weight: 700;
     font-family: var(--font-mono);
     font-size: 14px;
@@ -86,7 +122,7 @@
     padding: 10px 12px;
     border-radius: 10px;
     border: 1px solid var(--panel-border);
-    background: white;
+    background: var(--control-bg);
     color: var(--text-primary);
     font-size: 13.5px;
     font-weight: 500;
@@ -128,7 +164,7 @@
     width: 100%;
   }
 
-  .mode-item:hover { background: #ececf1; }
+  .mode-item:hover { background: var(--hover-bg); }
   .mode-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
   .mode-icon { width: 17px; height: 17px; flex-shrink: 0; }
@@ -192,11 +228,11 @@
     height: 52px;
     margin: 0 auto 18px;
     border-radius: 16px;
-    background: linear-gradient(135deg, var(--accent), #8b8ef8);
+    background: linear-gradient(135deg, var(--accent), var(--accent-gradient-end));
     display: flex;
     align-items: center;
     justify-content: center;
-    color: white;
+    color: var(--on-accent);
     font-weight: 700;
     font-family: var(--font-mono);
     font-size: 22px;
@@ -227,7 +263,7 @@
     border-radius: 12px;
     padding: 13px 14px;
     cursor: pointer;
-    background: white;
+    background: var(--control-bg);
     transition: border-color 0.15s ease, transform 0.15s ease;
   }
   .suggestion-card:hover { border-color: var(--accent); transform: translateY(-1px); }
@@ -249,11 +285,11 @@
     font-weight: 700;
     font-family: var(--font-mono);
   }
-  .avatar.bot { background: linear-gradient(135deg, var(--accent), #8b8ef8); color: white; }
+  .avatar.bot { background: linear-gradient(135deg, var(--accent), var(--accent-gradient-end)); color: var(--on-accent); }
   .avatar.user {
     background-size: cover;
     background-position: center;
-    color: #48484f;
+    color: var(--text-secondary);
     overflow: hidden;
   }
   .avatar.user img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -320,7 +356,7 @@
     border: 1.5px solid var(--panel-border);
     border-radius: 18px;
     padding: 10px 10px 10px 16px;
-    background: white;
+    background: var(--control-bg);
     transition: border-color 0.15s ease;
   }
   .composer-box:focus-within { border-color: var(--accent); }
@@ -335,6 +371,8 @@
     line-height: 1.5;
     max-height: 140px;
     padding: 4px 0;
+    background: transparent;
+    color: var(--text-primary);
   }
 
   .send-btn {
@@ -342,7 +380,7 @@
     border-radius: 10px;
     border: none;
     background: var(--accent);
-    color: white;
+    color: var(--on-accent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -351,7 +389,7 @@
     transition: background 0.15s ease;
   }
   .send-btn:hover { background: var(--accent-hover); }
-  .send-btn:disabled { background: #d8d8e0; cursor: default; }
+  .send-btn:disabled { background: var(--disabled-bg); cursor: default; }
 
   .composer-hint {
     text-align: center;
@@ -374,7 +412,7 @@
     .topbar { display: flex; }
     .overlay.show {
       display: block;
-      position: fixed; inset: 0; background: rgba(0,0,0,0.25); z-index: 15;
+      position: fixed; inset: 0; background: var(--overlay-bg); z-index: 15;
     }
     .suggestion-grid { grid-template-columns: 1fr; }
   }
@@ -457,7 +495,7 @@
       <div class="composer">
         <div class="active-mode-pill" id="activeModePill">
           <span id="activeModeText">Image mode</span>
-          <select id="docTypeSelect" style="display:none; margin-left:8px; border:none; background:white; border-radius:6px; padding:2px 6px; font-size:12px; font-weight:600; color:var(--accent);">
+          <select id="docTypeSelect" style="display:none; margin-left:8px; border:none; background:var(--control-bg); border-radius:6px; padding:2px 6px; font-size:12px; font-weight:600; color:var(--accent);">
             <option value="pdf">PDF</option>
             <option value="docx">Word (.docx)</option>
             <option value="pptx">PowerPoint (.pptx)</option>
