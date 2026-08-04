@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-<meta name="theme-color" content="#5b5ff0" />
+<meta name="theme-color" content="#5b5ff0" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0f1018" media="(prefers-color-scheme: dark)" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="default" />
 <meta name="apple-mobile-web-app-title" content="Ladex AI" />
@@ -57,6 +58,24 @@
     --radius: 14px;
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'IBM Plex Mono', monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1018;
+      --sidebar-bg: #171924;
+      --panel-border: #2a2d3a;
+      --text-primary: #f4f5fb;
+      --text-secondary: #a7abb8;
+      --accent: #8b8ef8;
+      --accent-soft: #242548;
+      --accent-hover: #a5a7ff;
+      --bubble-user: #252735;
+      --bubble-bot: #181a24;
+      --radius: 14px;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'IBM Plex Mono', monospace;
+    }
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
