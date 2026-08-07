@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const app: Express = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-app.use(express.static(path.join(__dirname, "..", "public")));
+app.use(express.static(path.join(__dirname, "..", "public"), { dotfiles: "allow" }));
 
 app.use(
   pinoHttp({
