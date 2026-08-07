@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.onrender.gemini_bot_buddy.twa",
+        "sha256_cert_fingerprints": ["90:AD:1A:57:08:A2:93:2C:91:4C:0A:49:BF:08:37:D8:2B:0D:3B:B0:EC:12:02:D1:61:44:5E:65:C3:A0:0D:AF"]
+      }
+    }]
