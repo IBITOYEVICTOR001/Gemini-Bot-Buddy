@@ -8,7 +8,7 @@ import {
   generateGame,
   generateTranslation,
   type ChatMessage,
-} from "../services/gemini";
+} from "../services/aiProvider";
 import { runTavilySearch, type SearchResult } from "../services/tavily";
 import { synthesizeSpeech, transcribeAudio } from "../services/hf";
 import {
@@ -19,7 +19,7 @@ import {
 
 const router = Router();
 
-router.post("/gemini/chat", async (req, res) => {
+router.post("/chat", async (req, res) => {
   const body = req.body as {
     text?: string;
     history?: ChatMessage[];
@@ -42,7 +42,7 @@ router.post("/gemini/chat", async (req, res) => {
   }
 });
 
-router.post("/gemini/translate", async (req, res) => {
+router.post("/translate", async (req, res) => {
   const { text, targetLanguage } = req.body as {
     text?: string;
     targetLanguage?: string;
@@ -60,7 +60,7 @@ router.post("/gemini/translate", async (req, res) => {
   }
 });
 
-router.post("/gemini/creative", async (req, res) => {
+router.post("/creative", async (req, res) => {
   const { type, topic } = req.body as {
     type?: "story" | "poem" | "dialogue" | "projectIdeas";
     topic?: string;
@@ -78,7 +78,7 @@ router.post("/gemini/creative", async (req, res) => {
   }
 });
 
-router.post("/gemini/game", async (req, res) => {
+router.post("/game", async (req, res) => {
   const { gameType, subject } = req.body as {
     gameType?: "hangman" | "20questions" | "wordjumble";
     subject?: string;
@@ -96,7 +96,7 @@ router.post("/gemini/game", async (req, res) => {
   }
 });
 
-router.post("/gemini/code", async (req, res) => {
+router.post("/code", async (req, res) => {
   const { request, language } = req.body as {
     request?: string;
     language?: string;
@@ -114,7 +114,7 @@ router.post("/gemini/code", async (req, res) => {
   }
 });
 
-router.post("/gemini/analyze", async (req, res) => {
+router.post("/analyze", async (req, res) => {
   const { data, question } = req.body as {
     data?: unknown;
     question?: string;

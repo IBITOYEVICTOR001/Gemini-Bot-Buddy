@@ -1,5 +1,3 @@
-import OpenAI from "openai";
-
 // --- Types ---
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
@@ -18,16 +16,59 @@ export type SearchResult = {
 };
 
 // --- Client & Model Setup ---
-const apiKey = process.env.GROQ_API_KEY || "";
-const baseURL = "https://api.groq.com/openai/v1";
+export const GROQ_CHAT_COMPLETIONS_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
 
-const groq = new OpenAI({
-  apiKey,
-  baseURL,
-});
+export function getGroqApiKey(): string {
+  return process.env.GROQ_API_KEY?.trim() ?? "";
+}
 
-const rawModel = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
-export const GROQ_MODEL = rawModel;
+export function getGroqModel(): string {
+  return process.env.GROQ_MODEL?.trim() || DEFAULT_GROQ_MODEL;
+}
+
+export const GROQ_MODEL = getGroqModel();
+
+type GroqChatCompletionResponse = {
+  choices?: Array<{ message?: { content?: string | null } }>;
+};
+
+function getGroqHeaders(apiKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+}
+
+function getErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+
+  const cause = error.cause instanceof Error ? `; cause: ${error.cause.message}` : "";
+  return `${error.message}${cause}`;
+}
+
+async function createGroqChatCompletion(body: Record<string, unknown>): Promise<GroqChatCompletionResponse> {
+  const apiKey = getGroqApiKey();
+
+  if (!apiKey) {
+    throw new Error("GROQ_API_KEY is not set; cannot call Groq chat completions.");
+  }
+
+  const response = await fetch(GROQ_CHAT_COMPLETIONS_ENDPOINT, {
+    method: "POST",
+    headers: getGroqHeaders(apiKey),
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Groq chat completions request failed: ${response.status} ${response.statusText} - ${errorText}`,
+    );
+  }
+
+  return (await response.json()) as GroqChatCompletionResponse;
+}
 
 // --- Core System Prompts ---
 const CORE_INTELLIGENCE_SYSTEM_PROMPT = `You are Ladex AI, an exceptionally smart, friendly, and versatile AI assistant. 
@@ -77,14 +118,14 @@ export async function groqChat(
       });
     }
 
-    const response = await groq.chat.completions.create({
-      model: GROQ_MODEL,
+    const response = await createGroqChatCompletion({
+      model: getGroqModel(),
       messages: formattedMessages,
     });
 
-    return response.choices[0]?.message?.content || "No response generated.";
+    return response.choices?.[0]?.message?.content || "No response generated.";
   } catch (error) {
-    console.error("Error in groqChat:", error);
+    console.error("Error in groqChat:", getErrorMessage(error));
     throw error;
   }
 }
@@ -113,20 +154,20 @@ export async function decideSearch(
       ...(history.length > 0 ? history : [{ role: "user" as const, content: userText }]),
     ];
 
-    const response = await groq.chat.completions.create({
-      model: GROQ_MODEL,
+    const response = await createGroqChatCompletion({
+      model: getGroqModel(),
       messages,
       response_format: { type: "json_object" },
     });
 
-    const content = response.choices[0]?.message?.content || "{}";
+    const content = response.choices?.[0]?.message?.content || "{}";
     const parsed = JSON.parse(content);
     return {
       needs_search: Boolean(parsed.needs_search),
       search_query: parsed.search_query || "",
     };
   } catch (error) {
-    console.error("Error in decideSearch:", error);
+    console.error("Error in decideSearch:", getErrorMessage(error));
     return { needs_search: false, search_query: "" };
   }
 }

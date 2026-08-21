@@ -1,10 +1,9 @@
-import * as gemini from "./gemini";
 import * as groq from "./groq";
-import type { ChatMessage, SearchDecision, SearchResult } from "./gemini";
+import type { ChatMessage, SearchDecision, SearchResult } from "./groq";
 
 export type { ChatMessage, SearchDecision, SearchResult };
 
-type AiProviderName = "gemini" | "groq";
+type AiProviderName = "groq";
 type CreativeType = "story" | "poem" | "dialogue" | "projectIdeas";
 type GameType = "hangman" | "20questions" | "wordjumble";
 
@@ -24,16 +23,6 @@ type AiProvider = {
 };
 
 const providers: Record<AiProviderName, AiProvider> = {
-  gemini: {
-    chat: gemini.geminiChat,
-    generateConversationReply: gemini.generateConversationReply,
-    decideSearch: gemini.decideSearch,
-    generateCreativeOutput: gemini.generateCreativeOutput,
-    generateGame: gemini.generateGame,
-    generateCodeSnippet: gemini.generateCodeSnippet,
-    generateTranslation: gemini.generateTranslation,
-    analyzeDataset: gemini.analyzeDataset,
-  },
   groq: {
     chat: groq.groqChat,
     generateConversationReply: groq.generateConversationReply,
@@ -48,11 +37,11 @@ const providers: Record<AiProviderName, AiProvider> = {
 
 export function getAiProviderName(): AiProviderName {
   const configuredProvider = process.env.AI_PROVIDER?.trim().toLowerCase();
-  if (configuredProvider === "gemini" || configuredProvider === "groq") {
-    return configuredProvider;
+  if (configuredProvider && configuredProvider !== "groq") {
+    console.warn(`Unsupported AI_PROVIDER=${configuredProvider}; using groq.`);
   }
 
-  return "gemini";
+  return "groq";
 }
 
 export function getAiProvider(): AiProvider {
