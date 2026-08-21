@@ -15,7 +15,7 @@ import {
   generateCodeSnippet,
   generateTranslation,
   type ChatMessage,
-} from "./services/groq";
+} from "./services/aiProvider";
 import { runTavilySearch } from "./services/tavily";
 import { searchSerperImages } from "./services/serperImage";
 import { createVideoJob, pollVideoCompletion } from "./services/json2video";
