@@ -30,7 +30,20 @@ app.use(
     },
   }),
 );
-app.use(cors());
+const allowedCorsOrigins = new Set(["https://ladexai.netlify.app"]);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedCorsOrigins.has(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`Origin ${origin} is not allowed by CORS`));
+    },
+  }),
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.post("/api/telegram-webhook", (req, res) => {
