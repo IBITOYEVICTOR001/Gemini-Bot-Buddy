@@ -3,7 +3,7 @@ import {
   decideSearch,
   generateConversationReply,
   type ChatMessage,
-} from "../services/groq";
+} from "../services/aiProvider";
 import { runTavilySearch } from "../services/tavily";
 import { searchSerperImages } from "../services/serperImage";
 import {
